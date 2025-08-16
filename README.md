@@ -1,6 +1,6 @@
 # LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
-This version is adapted to load pretrained weights from Hugging Face Hub.
+This version is adapted to load pretrained weights from Hugging Face Hub. Not finished yet, there's significant output degradation.
 
 ## Get started
 
