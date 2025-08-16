@@ -47,7 +47,7 @@ class LFM2Config:
     rms_norm_eps: float = 1e-5
     rope_theta: float = 1000000.0
     tie_word_embeddings: bool = True
-    initializer_range: float = 0.02 # Used only if not loading weights
+    initializer_range: float = 0.02
     attention_dropout: float = 0.0
     hidden_dropout: float = 0.0
 
@@ -56,8 +56,6 @@ class LFM2Config:
         """Creates a config instance from a Hugging Face config dictionary."""
         intermediate_size = config_dict.get("block_ff_dim", config_dict.get("intermediate_size"))
 
-        ## FIX 1: Correctly calculate the FFN intermediate size.
-        # This logic is copied from the official HF implementation's Lfm2MLP class.
         if config_dict.get("block_auto_adjust_ff_dim", False):
             intermediate_size = int(2 * intermediate_size / 3)
             multiple_of = config_dict.get("block_multiple_of", 256)
@@ -86,8 +84,6 @@ class RotaryPositionalEmbedding:
         t = Tensor.arange(start_pos, start_pos + seq_len, device=x.device).cast(self.inv_freq.dtype)
         freqs = t.reshape(-1, 1) * self.inv_freq.reshape(1, -1)
         emb = Tensor.cat(freqs, freqs, dim=-1)
-        # The broadcasting in apply_rotary_pos_emb will handle the head dimension.
-        # Shape: (seq_len, head_dim)
         return emb.cos(), emb.sin()
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
@@ -99,15 +95,12 @@ class LFM2ConvOperator:
         self.in_proj = Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
         self.conv = Conv2d(config.hidden_size, config.hidden_size,
                            kernel_size=(config.conv_kernel_size, 1),
-                           padding=0, # Causal padding is applied manually
+                           padding=0,
                            groups=config.hidden_size, bias=False)
         self.out_proj = Linear(config.hidden_size, config.hidden_size, bias=False)
 
     def __call__(self, x: Tensor) -> Tensor:
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
-
-        ## FIX 2: Add the missing SiLU activation for the GLU. This is the main bug fix.
-        # This non-linearity is critical for the model to learn.
         x_gated = B * x_proj.silu()
 
         x_conv = x_gated.permute(0, 2, 1).unsqueeze(3)
@@ -143,7 +136,6 @@ class GroupedQueryAttention:
         query_states = self.q_layernorm(query_states).permute(0, 2, 1, 3)
         key_states = self.k_layernorm(key_states).permute(0, 2, 1, 3)
 
-        ## FIX 3: Use the pre-computed cos and sin values passed from the main model.
         cos, sin = cos_sin
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -191,7 +183,7 @@ class LFM2DecoderLayer:
             operator_out, new_kv_cache = self.operator(normed_h, attention_mask, past_key_value, cos_sin)
         else:
             operator_out = self.operator(normed_h)
-            new_kv_cache = None # Conv layers have no cache
+            new_kv_cache = None
 
         h = residual + operator_out
         residual = h
@@ -204,7 +196,6 @@ class LFM2DecoderLayer:
 class LFM2Model:
     def __init__(self, config: LFM2Config):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        # Final norm before the lm_head
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.layers = []
@@ -212,8 +203,6 @@ class LFM2Model:
             is_attention = i in config.full_attn_idxs
             self.layers.append(LFM2DecoderLayer(config, is_attention_block=is_attention))
             print(f"Layer {i}: {'LFM2DecoderLayer (Attention)' if is_attention else 'LFM2DecoderLayer (Convolution)'}")
-
-        ## FIX 3: Create a single RoPE instance to be shared across all attention layers.
         self.rotary_emb = RotaryPositionalEmbedding(config.hidden_size // config.num_attention_heads, config.rope_theta)
 
     def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]], start_pos: int = 0):
@@ -224,17 +213,14 @@ class LFM2Model:
         if seq_len > 1:
             mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize()
 
-        ## FIX 3: Calculate RoPE once before the layers.
         cos_sin = self.rotary_emb(h, seq_len, start_pos)
 
         new_kv_caches = []
         for i, layer in enumerate(self.layers):
             past_kv = past_key_values[i] if past_key_values is not None else None
-            # Pass cos_sin to each layer
             h, new_kv = layer(h, mask, past_kv, cos_sin)
             new_kv_caches.append(new_kv)
 
-        # Apply the final normalization before the lm_head
         h = self.norm(h)
 
         return h, new_kv_caches
@@ -265,7 +251,7 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
 
     key_map = {
         "model.embed_tokens.weight": "model.embed_tokens.weight",
-        "model.embedding_norm.weight": "model.norm.weight", # HF calls it `embedding_norm`, we call it `norm`
+        "model.embedding_norm.weight": "model.norm.weight",
     }
     for i, layer in enumerate(model.model.layers):
         prefix_hf = f"model.layers.{i}"
@@ -320,7 +306,6 @@ def generate(
     print("\n--- Starting Text Generation ---")
     print(f"Prompt: {prompt}")
 
-    # The HF tokenizer for LFM2 annoyingly does not add a BOS token by default.
     prompt_tokens = tokenizer.encode(prompt)
     if tokenizer.bos_token_id and prompt_tokens[0] != tokenizer.bos_token_id:
         prompt_tokens = [tokenizer.bos_token_id] + prompt_tokens
@@ -344,7 +329,6 @@ def generate(
     tokens.append(next_token_id)
 
     print("Generating new tokens...")
-    # The tokenizer sometimes prints the BOS token as '<|startoftext|>', let's decode the whole prompt for clean printing
     print(tokenizer.decode(prompt_tokens), end="", flush=True)
 
     for _ in trange(max_new_tokens - 1):
