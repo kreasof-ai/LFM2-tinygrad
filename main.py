@@ -1,9 +1,13 @@
-# LFM2 (Liquid Foundation Model 2) tinygrad Implementation
-#
-# This version is adapted to load pretrained weights from Hugging Face Hub.
-# It correctly interprets the HF config to build the interleaved
-# convolution/attention architecture.
-#
+"""
+LFM2 (Liquid Foundation Model 2) tinygrad Implementation
+
+This version is adapted to load pretrained weights from Hugging Face Hub.
+It correctly interprets the HF config to build the interleaved
+convolution/attention architecture.
+
+Heavily inspired from https://github.com/kyegomez/LFM2 implementation
+"""
+
 
 import json
 import math
