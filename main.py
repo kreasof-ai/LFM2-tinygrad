@@ -5,7 +5,7 @@ This version is adapted to load pretrained weights from Hugging Face Hub.
 It correctly interprets the HF config to build the interleaved
 convolution/attention architecture.
 
-Heavily inspired from https://github.com/kyegomez/LFM2 implementation
+Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
 """
 
 
@@ -18,6 +18,8 @@ from typing import Any, List, Optional, Tuple
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 import torch # only used for converting weights
+from tqdm import trange
+from transformers import AutoTokenizer
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes, GlobalCounters
@@ -52,10 +54,19 @@ class LFM2Config:
     @classmethod
     def from_hf_config(cls, config_dict: dict) -> "LFM2Config":
         """Creates a config instance from a Hugging Face config dictionary."""
+        intermediate_size = config_dict.get("block_ff_dim", config_dict.get("intermediate_size"))
+
+        ## FIX 1: Correctly calculate the FFN intermediate size.
+        # This logic is copied from the official HF implementation's Lfm2MLP class.
+        if config_dict.get("block_auto_adjust_ff_dim", False):
+            intermediate_size = int(2 * intermediate_size / 3)
+            multiple_of = config_dict.get("block_multiple_of", 256)
+            intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
+
         return cls(
             vocab_size=config_dict["vocab_size"],
             hidden_size=config_dict["hidden_size"],
-            intermediate_size=config_dict.get("block_ff_dim", config_dict.get("intermediate_size")),
+            intermediate_size=intermediate_size,
             num_hidden_layers=config_dict["num_hidden_layers"],
             num_attention_heads=config_dict.get("num_attention_heads", config_dict.get("num_heads")),
             num_key_value_heads=config_dict["num_key_value_heads"],
@@ -70,10 +81,13 @@ class RotaryPositionalEmbedding:
     def __init__(self, dim: int, base: float):
         inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtypes.float32) / dim))
         self.inv_freq = inv_freq
-    def __call__(self, x: Tensor, seq_len: int) -> Tuple[Tensor, Tensor]:
-        t = Tensor.arange(seq_len, device=x.device).cast(self.inv_freq.dtype)
+
+    def __call__(self, x: Tensor, seq_len: int, start_pos: int = 0) -> Tuple[Tensor, Tensor]:
+        t = Tensor.arange(start_pos, start_pos + seq_len, device=x.device).cast(self.inv_freq.dtype)
         freqs = t.reshape(-1, 1) * self.inv_freq.reshape(1, -1)
         emb = Tensor.cat(freqs, freqs, dim=-1)
+        # The broadcasting in apply_rotary_pos_emb will handle the head dimension.
+        # Shape: (seq_len, head_dim)
         return emb.cos(), emb.sin()
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
@@ -85,14 +99,22 @@ class LFM2ConvOperator:
         self.in_proj = Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
         self.conv = Conv2d(config.hidden_size, config.hidden_size,
                            kernel_size=(config.conv_kernel_size, 1),
-                           padding=(config.conv_kernel_size // 2, 0),
+                           padding=0, # Causal padding is applied manually
                            groups=config.hidden_size, bias=False)
         self.out_proj = Linear(config.hidden_size, config.hidden_size, bias=False)
+
     def __call__(self, x: Tensor) -> Tensor:
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
-        x_gated = B * x_proj
+
+        ## FIX 2: Add the missing SiLU activation for the GLU. This is the main bug fix.
+        # This non-linearity is critical for the model to learn.
+        x_gated = B * x_proj.silu()
+
         x_conv = x_gated.permute(0, 2, 1).unsqueeze(3)
+        pad_arg = ((0, 0), (0, 0), (self.conv.kernel_size[0] - 1, 0), (0, 0))
+        x_conv = x_conv.pad(pad_arg)
         x_conv = self.conv(x_conv).squeeze(3).permute(0, 2, 1)
+
         return self.out_proj(C * x_conv)
 
 class GroupedQueryAttention:
@@ -103,18 +125,16 @@ class GroupedQueryAttention:
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        
+
         self.q_proj = Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.out_proj = Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        
+
         self.q_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        
-        self.rotary_emb = RotaryPositionalEmbedding(self.head_dim, config.rope_theta)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]], cos_sin: Tuple[Tensor, Tensor]):
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
@@ -123,11 +143,8 @@ class GroupedQueryAttention:
         query_states = self.q_layernorm(query_states).permute(0, 2, 1, 3)
         key_states = self.k_layernorm(key_states).permute(0, 2, 1, 3)
 
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None: kv_seq_len += past_key_value[0].shape[-2]
-        
-        cos, sin = self.rotary_emb(value_states, kv_seq_len)
-        cos, sin = cos[-q_len:][None, None, :, :], sin[-q_len:][None, None, :, :]
+        ## FIX 3: Use the pre-computed cos and sin values passed from the main model.
+        cos, sin = cos_sin
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
@@ -140,7 +157,7 @@ class GroupedQueryAttention:
 
         attn_weights = (query_states @ key_states.permute(0, 1, 3, 2)) / math.sqrt(self.head_dim)
         if attention_mask is not None: attn_weights += attention_mask
-        
+
         attn_weights = attn_weights.softmax(-1).cast(query_states.dtype)
         attn_output = (attn_weights @ value_states).permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
         return self.out_proj(attn_output), past_key_value
@@ -156,60 +173,70 @@ class SwiGLU:
 class LFM2DecoderLayer:
     """ The new unified decoder layer for both Conv and Attention """
     def __init__(self, config: LFM2Config, is_attention_block: bool):
-        # NOTE: From weights, intermediate_size is 4608, not 6656 from config.json
-        self.feed_forward = SwiGLU(config.hidden_size, 4608)
+        self.feed_forward = SwiGLU(config.hidden_size, config.intermediate_size)
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
+        self.is_attention_block = is_attention_block
+
         if is_attention_block:
             self.operator = GroupedQueryAttention(config)
         else:
             self.operator = LFM2ConvOperator(config)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]], cos_sin: Tuple[Tensor, Tensor]):
         residual = hidden_states
         normed_h = self.operator_norm(hidden_states)
-        
-        if isinstance(self.operator, GroupedQueryAttention):
-            operator_out, new_kv_cache = self.operator(normed_h, attention_mask, past_key_value)
+
+        if self.is_attention_block:
+            operator_out, new_kv_cache = self.operator(normed_h, attention_mask, past_key_value, cos_sin)
         else:
             operator_out = self.operator(normed_h)
             new_kv_cache = None # Conv layers have no cache
-        
+
         h = residual + operator_out
-        
         residual = h
         normed_h = self.ffn_norm(h)
         ffn_out = self.feed_forward(normed_h)
         h = residual + ffn_out
-        
+
         return h, new_kv_cache
 
 class LFM2Model:
     def __init__(self, config: LFM2Config):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        self.embedding_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
+        # Final norm before the lm_head
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
         self.layers = []
         for i in range(config.num_hidden_layers):
             is_attention = i in config.full_attn_idxs
             self.layers.append(LFM2DecoderLayer(config, is_attention_block=is_attention))
             print(f"Layer {i}: {'LFM2DecoderLayer (Attention)' if is_attention else 'LFM2DecoderLayer (Convolution)'}")
 
-    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]]):
+        ## FIX 3: Create a single RoPE instance to be shared across all attention layers.
+        self.rotary_emb = RotaryPositionalEmbedding(config.hidden_size // config.num_attention_heads, config.rope_theta)
+
+    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]], start_pos: int = 0):
         h = self.embed_tokens(input_ids)
-        h = self.embedding_norm(h)
-        
+        seq_len = h.shape[1]
+
         mask = None
-        if h.shape[1] > 1:
-            mask = Tensor.full((1, 1, h.shape[1], h.shape[1]), -float("inf")).triu(1).realize()
-        
+        if seq_len > 1:
+            mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize()
+
+        ## FIX 3: Calculate RoPE once before the layers.
+        cos_sin = self.rotary_emb(h, seq_len, start_pos)
+
         new_kv_caches = []
         for i, layer in enumerate(self.layers):
             past_kv = past_key_values[i] if past_key_values is not None else None
-            h, new_kv = layer(h, mask, past_kv)
+            # Pass cos_sin to each layer
+            h, new_kv = layer(h, mask, past_kv, cos_sin)
             new_kv_caches.append(new_kv)
-        
+
+        # Apply the final normalization before the lm_head
+        h = self.norm(h)
+
         return h, new_kv_caches
 
 class LFM2ForCausalLM:
@@ -218,29 +245,19 @@ class LFM2ForCausalLM:
         self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]] = None):
-        hidden_states, new_kv_caches = self.model(input_ids, past_key_values)
+
+    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]] = None, start_pos: int = 0):
+        hidden_states, new_kv_caches = self.model(input_ids, past_key_values, start_pos)
         return self.lm_head(hidden_states), new_kv_caches
 
 def _set_tensor(model: Any, key: str, tensor: Tensor):
-    """
-    Recursively sets a tensor in a nested object.
-    Handles both attribute and index access (for lists).
-    """
     attrs = key.split('.')
     for i, attr in enumerate(attrs[:-1]):
-        if isinstance(model, list):
-            model = model[int(attr)]
-        else:
-            model = getattr(model, attr)
-    
+        if isinstance(model, list): model = model[int(attr)]
+        else: model = getattr(model, attr)
     final_attr = attrs[-1]
-    
-    # Set the tensor on the final parent object
-    if isinstance(model, list):
-        model[int(final_attr)] = tensor
-    else:
-        setattr(model, final_attr, tensor)
+    if isinstance(model, list): model[int(final_attr)] = tensor
+    else: setattr(model, final_attr, tensor)
 
 def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.safetensors"):
     print(f"Fetching weights from {repo_id}/{filename}...")
@@ -248,7 +265,7 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
 
     key_map = {
         "model.embed_tokens.weight": "model.embed_tokens.weight",
-        "model.embedding_norm.weight": "model.embedding_norm.weight",
+        "model.embedding_norm.weight": "model.norm.weight", # HF calls it `embedding_norm`, we call it `norm`
     }
     for i, layer in enumerate(model.model.layers):
         prefix_hf = f"model.layers.{i}"
@@ -283,16 +300,73 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
             if hf_key not in f.keys():
                 print(f"Warning: Weight key not found in safetensors file: {hf_key}")
                 continue
-            
             pt_tensor = f.get_tensor(hf_key)
             np_array = pt_tensor.to(torch.float32).numpy()
             tensor_tg = Tensor(np_array, requires_grad=False)
-
             if 'conv.conv.weight' in hf_key:
                 tensor_tg = tensor_tg.unsqueeze(-1)
-            
             _set_tensor(model, tg_key, tensor_tg)
     print("All weights loaded and assigned.")
+
+
+def generate(
+    model: LFM2ForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float = 0.8,
+) -> str:
+    Tensor.training = False
+    print("\n--- Starting Text Generation ---")
+    print(f"Prompt: {prompt}")
+
+    # The HF tokenizer for LFM2 annoyingly does not add a BOS token by default.
+    prompt_tokens = tokenizer.encode(prompt)
+    if tokenizer.bos_token_id and prompt_tokens[0] != tokenizer.bos_token_id:
+        prompt_tokens = [tokenizer.bos_token_id] + prompt_tokens
+
+    tokens = [t for t in prompt_tokens]
+    input_ids = Tensor([tokens])
+    past_key_values = [None] * len(model.model.layers)
+    start_pos = 0
+
+    print("Processing prompt...")
+    logits, past_key_values = model(input_ids, past_key_values, start_pos=start_pos)
+    start_pos += len(tokens)
+
+    next_token_logits = logits[0, -1, :]
+    if temperature == 0:
+        next_token_id = next_token_logits.argmax().item()
+    else:
+        probs = (next_token_logits / temperature).softmax()
+        sample = Tensor.uniform(1).item()
+        next_token_id = (probs.cumsum() > sample).argmax().item()
+    tokens.append(next_token_id)
+
+    print("Generating new tokens...")
+    # The tokenizer sometimes prints the BOS token as '<|startoftext|>', let's decode the whole prompt for clean printing
+    print(tokenizer.decode(prompt_tokens), end="", flush=True)
+
+    for _ in trange(max_new_tokens - 1):
+        input_ids = Tensor([[next_token_id]])
+        logits, past_key_values = model(input_ids, past_key_values, start_pos=start_pos)
+        start_pos += 1
+
+        next_token_logits = logits[0, -1, :]
+        if temperature == 0:
+            next_token_id = next_token_logits.argmax().item()
+        else:
+            probs = (next_token_logits / temperature).softmax()
+            sample = Tensor.uniform(1).item()
+            next_token_id = (probs.cumsum() > sample).argmax().item()
+
+        tokens.append(next_token_id)
+        # print(tokenizer.decode([next_token_id]), end="", flush=True)
+        if next_token_id == tokenizer.eos_token_id:
+            break
+
+    print("\n--- Generation Complete ---")
+    return tokenizer.decode(tokens)
 
 
 if __name__ == "__main__":
@@ -303,7 +377,7 @@ if __name__ == "__main__":
     config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
     with open(config_path) as f:
         config_dict = json.load(f)
-    
+
     config = LFM2Config.from_hf_config(config_dict)
     print("\nModel configuration:")
     print(config)
@@ -315,23 +389,19 @@ if __name__ == "__main__":
     # 3. Load the pretrained weights
     load_from_hf(model, REPO_ID, filename="model.safetensors")
 
-    # 4. Run a test forward pass
-    print("\n--- Running a test forward pass ---")
-    # Note: We don't have the tokenizer here, so we use dummy IDs.
-    # The EOS token ID for this model is 7.
-    input_ids = Tensor([[1, 5, 20, 8, 33, 7]]) # Dummy input
-    print(f"Input tensor shape: {input_ids.shape}")
+    # 4. Load the tokenizer
+    print("\nLoading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
 
-    # Set training to False for inference
-    Tensor.training = False
-    
-    # Get logits
-    logits, _ = model(input_ids)
-    logits.realize() # Execute the computation graph
-    
-    print(f"Output logits shape: {logits.shape}")
-    print("Forward pass successful!")
+    # 5. Run text generation
+    prompt = "The secret to a long and happy life is"
+    generated_text = generate(
+        model,
+        tokenizer,
+        prompt,
+        max_new_tokens=20,
+        temperature=0.3
+    )
 
-    # Example of getting the predicted next token ID
-    predicted_id = logits[0, -1, :].argmax().item()
-    print(f"Predicted next token ID for the dummy sequence: {predicted_id}")
+    print("\nFinal generated text:")
+    print(generated_text)
