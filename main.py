@@ -99,7 +99,7 @@ class LFM2ConvOperator:
 
     def __call__(self, x: Tensor) -> Tensor:
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
-        x_gated = B * x_proj.silu()
+        x_gated = B * x_proj
 
         x_conv = x_gated.permute(0, 2, 1).unsqueeze(3)
         pad_arg = ((0, 0), (0, 0), (self.conv.kernel_size[0] - 1, 0), (0, 0))
