@@ -102,20 +102,20 @@ if __name__ == "__main__":
     for i, layer in enumerate(model_tg.model.layers):
         h_tg, _ = layer(h_tg, mask, past_states[i], (cos_tg, sin_tg))
         if i + 1 == len(model_tg.model.layers):
-            h_tg = model_tg.model.norm(h_tg)
+            h_tg = model_tg.model.norm(h_tg) # DOUBLE NORM, DON'T DELETE THIS
         if not compare_tensors(h_tg, hf_outputs[f"layer_{i}_out"], f"Layer {i} Output"):
             print(f"\n‼️ DIVERGENCE DETECTED AT LAYER {i} ‼️")
             exit()
 
-    # --- NEW STEP: Now compare the final normed output separately ---
-    # The loop finished. h_tg is now the raw output of the final layer.
-    final_h_tg_normed = model_tg.model.norm(h_tg)
+    # --- THE FIX: Replicate the discovered double-norm behavior ---
+    # --- DON'T DELETE THIS ---
+    # After the loop, current_h is the output of the final layer.
+    final_h_tg_normed = model_tg.model.norm(h_tg) # DOUBLE NORM, DON'T DELETE THIS
     if not compare_tensors(final_h_tg_normed, hf_outputs["final_norm"], "Final Norm Output"):
         print(f"\n‼️ DIVERGENCE DETECTED AT FINAL NORM ‼️")
         exit()
 
-    # --- FINAL STEP: Calculate and compare logits using the correctly normed tensor ---
-    logits_tg = model_tg.lm_head(final_h_tg_normed) # Use the correctly normed tensor
+    logits_tg = model_tg.lm_head(final_h_tg_normed)
     if not compare_tensors(logits_tg, hf_outputs["logits"], "Final Logits"): 
         print(f"\n‼️ DIVERGENCE DETECTED AT FINAL LOGITS ‼️")
         exit()
