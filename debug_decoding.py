@@ -5,7 +5,7 @@ import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
-from lfm2_modelling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
+from lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
 
 # --- Comparison Helper ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
@@ -49,21 +49,8 @@ def compare_caches(tg_states: list, hf_cache, config: LFM2Config, name: str) -> 
             # Convolution layer: compare conv state
             tg_conv_state = tg_states[i]
             hf_conv_state = hf_cache.conv_cache[i]
-            # HF conv cache might have a different shape in memory, let's check seq dim
-            # Our cache is (bsz, hidden_size, kernel_size-1)
-            # HF cache is (bsz, hidden_size, kernel_size)
-            # The important part is the content. HF uses a rolling buffer.
-            # Let's compare the last relevant parts.
-            # In tinygrad impl, the state *is* the input for the next step's conv.
-            # In HF, it's a buffer. For a single token forward, it's updated.
-            # Let's try a direct comparison first. The shapes might differ by 1.
-            # Trim the HF cache to match our expected size if necessary.
-            hf_conv_state_to_compare = hf_conv_state
-            if tg_conv_state.shape[2] != hf_conv_state.shape[2]:
-                 print(f"  Note: Trimming HF conv cache shape from {hf_conv_state.shape} to match TG {tg_conv_state.shape}")
-                 hf_conv_state_to_compare = hf_conv_state[:, :, :tg_conv_state.shape[2]]
 
-            if not compare_tensors(tg_conv_state, hf_conv_state_to_compare, f"Layer {i} Conv Cache"): all_match = False
+            if not compare_tensors(tg_conv_state, hf_conv_state, f"Layer {i} Conv Cache"): all_match = False
 
         if not all_match:
             print(f"‼️ DIVERGENCE DETECTED IN CACHE AT LAYER {i} ‼️")

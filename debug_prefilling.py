@@ -5,7 +5,7 @@ import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
-from lfm2_modelling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
+from lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
 
 # --- Comparison Helper ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):

@@ -25,10 +25,6 @@ from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
 
-# For reproducible tests
-if getenv("SEED"):
-    Tensor.manual_seed(getenv("SEED"))
-
 # --- Configuration ---
 
 @dataclass
@@ -115,20 +111,29 @@ class LFM2ConvOperator:
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
         x_gated = B * x_proj
 
-        # Switch from (bsz, seq_len, hidden_size) to (bsz, hidden_size, seq_len) for Conv1d
         x_gated_permuted = x_gated.permute(0, 2, 1)
 
-        if seq_len > 1: # Prefill stage
+        if seq_len > 1:
             conv_out = self.conv(x_gated_permuted)[:, :, :seq_len]
-            # The new conv_state is the last (kernel_size - 1) elements of the input
-            new_conv_state = x_gated_permuted[:, :, -(self.kernel_size - 1):]
+            if seq_len < self.kernel_size:
+                pad_amount = self.kernel_size - seq_len
+                padding = Tensor.zeros(bsz, self.hidden_size, pad_amount, device=x.device, dtype=x.dtype)
+                new_conv_state = Tensor.cat(padding, x_gated_permuted, dim=2)
+            else:
+                new_conv_state = x_gated_permuted[:, :, -self.kernel_size:]
         else: # Generation stage (seq_len == 1)
-            assert past_conv_state is not None, "past_conv_state must be provided for single-token generation"
-            # Concatenate past state with current input
-            conv_input = Tensor.cat(past_conv_state, x_gated_permuted, dim=2)
-            conv_out = self.conv(conv_input)[:, :, -1:]
-            # The new state is the concatenated input
-            new_conv_state = conv_input
+            assert past_conv_state is not None
+            assert past_conv_state.shape[2] == self.kernel_size
+
+            # Create the new state buffer by rolling: drop the oldest, append the newest.
+            new_conv_state = Tensor.cat(past_conv_state[:, :, 1:], x_gated_permuted, dim=2)
+
+            # Perform manual 1D convolution for the single step
+            # Instead of calling self.conv() again, we do the dot product directly.
+            # self.conv.weight shape: (hidden_size, 1, kernel_size) -> reshape for broadcasting
+            conv_weights = self.conv.weight.reshape(1, self.hidden_size, self.kernel_size)
+            # Element-wise product and sum over the kernel dimension.
+            conv_out = (new_conv_state * conv_weights).sum(axis=2, keepdim=True)
 
         conv_out = conv_out.permute(0, 2, 1)
         output = self.out_proj(C * conv_out)
@@ -235,8 +240,8 @@ class LFM2Model:
             current_h, new_st = layer(current_h, mask, past_st, (cos, sin))
             new_states_list.append(new_st)
             
-            # --- FIX: Apply the first norm INSIDE the final layer iteration ---
-            # This replicates the exact structure from compare.py that works.
+            # Apply the first norm INSIDE the final layer iteration
+            # This replicates the exact structure from debug_prefilling.py that works.
             if i + 1 == len(self.layers):
                 current_h = self.norm(current_h)
         
@@ -379,44 +384,3 @@ def generate(
 
     print("\n--- Generation Complete ---")
     return tokenizer.decode(tokens)
-
-
-if __name__ == "__main__":
-    REPO_ID = "LiquidAI/LFM2-350M"
-    print(f"--- Loading LFM2 Model: {REPO_ID} ---")
-
-    # 1. Download and load the configuration
-    config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
-    with open(config_path) as f:
-        config_dict = json.load(f)
-
-    config = LFM2Config.from_hf_config(config_dict)
-    print("\nModel configuration:")
-
-    for i in range(config.num_hidden_layers):
-        is_attention = i in config.full_attn_idxs
-        print(f"Layer {i}: {'Attention' if is_attention else 'Convolution'}")
-
-    # 2. Initialize the model structure
-    print("\nInitializing model architecture...")
-    model = LFM2ForCausalLM(config)
-
-    # 3. Load the pretrained weights
-    load_from_hf(model, REPO_ID, filename="model.safetensors")
-
-    # 4. Load the tokenizer
-    print("\nLoading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
-
-    # 5. Run text generation
-    prompt = "The secret to a long and happy life is"
-    generated_text = generate(
-        model,
-        tokenizer,
-        prompt,
-        max_new_tokens=50,
-        temperature=0.3
-    )
-
-    print("\nFinal generated text:")
-    print(generated_text)

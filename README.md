@@ -1,6 +1,6 @@
 # LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
-This version is adapted to load pretrained weights from Hugging Face Hub. Not finished yet, there's significant output degradation.
+This version is adapted to load pretrained weights from Hugging Face Hub.
 
 ## Get started
 
@@ -15,7 +15,7 @@ This version is adapted to load pretrained weights from Hugging Face Hub. Not fi
 
 ## Disclaimer
 
-- Empirical test with `compare.py` shows huggingface implementation apply final norm inside final layer.
+- Empirical test with `debug_prefilling.py` shows huggingface implementation apply final norm inside final layer.
 
 This is output when final norm is applied inside layer 15
 
