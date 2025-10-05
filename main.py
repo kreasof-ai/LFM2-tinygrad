@@ -7,6 +7,9 @@ from transformers import AutoTokenizer
 # tinygrad imports
 from tinygrad import Tensor
 from tinygrad.helpers import getenv
+from tinygrad import Device
+
+print("DEVICE:", Device.DEFAULT)
 
 # For reproducible tests
 if getenv("SEED"):

@@ -175,12 +175,18 @@ class GroupedQueryAttention:
 
         key_states = key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
         value_states = value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
+        
+        # *** OPTIMIZATION: Replaced manual attention with tinygrad's fused SDPA kernel ***
+        # The original implementation was:
+        # attn_weights = (query_states @ key_states.permute(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+        # if attention_mask is not None: attn_weights += attention_mask
+        # attn_weights = attn_weights.softmax(-1).cast(query_states.dtype)
+        # attn_output = (attn_weights @ value_states)
 
-        attn_weights = (query_states @ key_states.permute(0, 1, 3, 2)) / math.sqrt(self.head_dim)
-        if attention_mask is not None: attn_weights += attention_mask
+        # The new implementation uses a single, highly optimized function.
+        attn_output = Tensor.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask)
 
-        attn_weights = attn_weights.softmax(-1).cast(query_states.dtype)
-        attn_output = (attn_weights @ value_states).permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
         return self.out_proj(attn_output), present_key_value
 
 class SwiGLU:
