@@ -240,7 +240,7 @@ class LFM2Model:
             if i + 1 == len(self.layers):
                 current_h = self.norm(current_h)
         
-        return h, new_states_list
+        return current_h, new_states_list
 
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
