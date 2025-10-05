@@ -23,7 +23,6 @@ from transformers import AutoTokenizer
 # tinygrad imports
 from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
-# --- FIX 1: Import Conv1d ---
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
 
 # For reproducible tests
@@ -81,7 +80,7 @@ class RotaryPositionalEmbedding:
         self.inv_freq = inv_freq
 
     def __call__(self, x: Tensor, seq_len: int, start_pos: int = 0) -> Tuple[Tensor, Tensor]:
-        # --- FIX: The RoPE calculation must include the batch dimension to match HF ---
+        # The RoPE calculation must include the batch dimension to match HF
         bsz = x.shape[0]
         t = Tensor.arange(start_pos, start_pos + seq_len, device=x.device).cast(self.inv_freq.dtype)
         freqs = t.reshape(-1, 1) * self.inv_freq.reshape(1, -1)
@@ -95,7 +94,6 @@ class RotaryPositionalEmbedding:
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
 def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
-# --- FIX 2: Complete rewrite of LFM2ConvOperator to use Conv1d and handle stateful caching ---
 class LFM2ConvOperator:
     """ The actual convolution operator part of a conv block, now with caching. """
     def __init__(self, config: LFM2Config):
@@ -201,7 +199,6 @@ class LFM2DecoderLayer:
         else:
             self.operator = LFM2ConvOperator(config)
 
-    # --- FIX 3: Update call signature to handle generic past_state ---
     def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor]):
         residual = hidden_states
 
@@ -229,7 +226,7 @@ class LFM2Model:
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         cos_sin = self.rotary_emb(h, seq_len, start_pos)
         
-        # --- FIX: Replace list comprehension with a proper for loop to chain layers ---
+        # Replace list comprehension with a proper for loop to chain layers
         new_states_list = []
         current_h = h # Start with the initial embeddings
         
@@ -239,22 +236,22 @@ class LFM2Model:
             new_states_list.append(new_st)
             
         # --- THE FIX: Replicate the discovered double-norm behavior ---
+        # --- DON'T DELETE THIS ---
         # After the loop, current_h is the output of the final layer.
         h = self.norm(current_h) # First norm application
         h = self.norm(h)         # Second norm application
-        # -----------------------------------------------------------
+        # --------------------------------------------------------------
         
         return h, new_states_list
 
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
-        self.config = config  # <-- ADD THIS LINE
+        self.config = config
         self.model = LFM2Model(config)
         self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    # --- FIX 6: Update call signature and docstrings ---
     def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0):
         hidden_states, new_states = self.model(input_ids, past_states, start_pos)
         return self.lm_head(hidden_states), new_states
@@ -273,7 +270,6 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
     local_path = hf_hub_download(repo_id=repo_id, filename=filename)
 
     key_map = {
-        # --- FIX 7: HF model calls final norm `embedding_norm` ---
         "model.embedding_norm.weight": "model.norm.weight",
         "model.embed_tokens.weight": "model.embed_tokens.weight",
     }
@@ -313,9 +309,6 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
             pt_tensor = f.get_tensor(hf_key)
             np_array = pt_tensor.to(torch.float32).numpy()
             tensor_tg = Tensor(np_array, requires_grad=False)
-            # --- FIX 8: Remove the unsqueeze hack, as we now use Conv1d ---
-            # if 'conv.conv.weight' in hf_key:
-            #     tensor_tg = tensor_tg.unsqueeze(-1)
             _set_tensor(model, tg_key, tensor_tg)
 
     print("Re-tying word embeddings for lm_head...")
@@ -333,26 +326,22 @@ def generate(
 ) -> str:
     Tensor.training = False
     print("\n--- Starting Text Generation ---")
-    # --- THE FIX: Use the tokenizer's chat template ---
-    # 1. Format the prompt into the standard message structure.
+
     messages = [
         {"role": "user", "content": prompt},
     ]
 
-    # 2. Apply the template. This adds all necessary special tokens (BOS, user/assistant roles, etc.)
-    #    and prepares the model to generate a response.
     prompt_tokens = tokenizer.apply_chat_template(
         messages, 
-        add_generation_prompt=True, # Crucial for telling the model to start its turn
+        add_generation_prompt=True,
         tokenize=True
     )
-    # ---------------------------------------------------
 
     print(f"Formatted Prompt (decoded): {tokenizer.decode(prompt_tokens)}")
     
     tokens = [t for t in prompt_tokens]
     input_ids = Tensor([tokens])
-    # --- FIX 9: Initialize past_states correctly for both operator types ---
+    # Initialize past_states correctly for both operator types
     past_states = [None] * len(model.model.layers)
     start_pos = 0
 
@@ -386,7 +375,7 @@ def generate(
             next_token_id = (probs.cumsum() > sample).argmax().item()
 
         tokens.append(next_token_id)
-        print(tokenizer.decode([next_token_id]), end="", flush=True) # --- Improvement: print token by token ---
+        print(tokenizer.decode([next_token_id]), end="", flush=True)
         if next_token_id == tokenizer.eos_token_id:
             break
 
@@ -405,7 +394,7 @@ if __name__ == "__main__":
 
     config = LFM2Config.from_hf_config(config_dict)
     print("\nModel configuration:")
-    # --- FIX 10: Print layer types for verification ---
+
     for i in range(config.num_hidden_layers):
         is_attention = i in config.full_attn_idxs
         print(f"Layer {i}: {'Attention' if is_attention else 'Convolution'}")
@@ -427,7 +416,7 @@ if __name__ == "__main__":
         model,
         tokenizer,
         prompt,
-        max_new_tokens=50, # Increased for a better demo
+        max_new_tokens=50,
         temperature=0.3
     )
 
