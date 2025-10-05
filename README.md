@@ -1,5 +1,7 @@
 # LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
+> This shit works, it's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference.
+
 This version is adapted to load pretrained weights from Hugging Face Hub.
 
 ## Get started
