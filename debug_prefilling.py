@@ -44,7 +44,6 @@ if __name__ == "__main__":
 
     # 2. Load tinygrad model
     print("\nLoading tinygrad model...")
-    # Get config from HF model
     config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
     with open(config_path) as f:
         config_dict = json.load(f)
@@ -57,55 +56,43 @@ if __name__ == "__main__":
     input_ids_tg = Tensor(input_ids_pt.numpy().astype(np.int32))
     seq_len = input_ids_pt.shape[1]
 
-    # --- 4. Get all intermediate outputs from HF model ---
-    hf_outputs = {}
-    with torch.no_grad():
-        # A. Embeddings
-        hf_outputs["embeds"] = model_hf.model.embed_tokens(input_ids_pt)
-
-        # B. Rotary Embeddings
-        position_ids = torch.arange(0, seq_len, dtype=torch.long).unsqueeze(0)
-        cos_hf, sin_hf = model_hf.model.pos_emb(hf_outputs["embeds"], position_ids)
-        hf_outputs["cos"] = cos_hf
-        hf_outputs["sin"] = sin_hf
-
-        # C. Full forward pass to get hidden states
-        # The first element of `hidden_states` is the initial embedding
-        # `hidden_states[i+1]` is the output of `layer i`
-        pt_forward_out = model_hf.model(input_ids_pt, output_hidden_states=True)
-        for i in range(config_tg.num_hidden_layers):
-            hf_outputs[f"layer_{i}_out"] = pt_forward_out.hidden_states[i + 1]
-
-        hf_outputs["logits"] = model_hf.lm_head(pt_forward_out.hidden_states[-1])
-
-    # --- 5. Step-by-step forward pass for tinygrad model and compare ---
+    # 4. Run full forward pass on both models
     print("\n\n--- Starting Step-by-Step tinygrad Comparison ---")
-
-    # A. Compare Embeddings
-    h_tg = model_tg.model.embed_tokens(input_ids_tg)
-    if not compare_tensors(h_tg, hf_outputs["embeds"], "Initial Embeddings"): exit()
-
-    # B. Compare Rotary Embeddings
-    cos_tg, sin_tg = model_tg.model.rotary_emb(h_tg, seq_len, 0)
-    if not compare_tensors(cos_tg, hf_outputs["cos"], "RoPE Cos"): exit()
-    if not compare_tensors(sin_tg, hf_outputs["sin"], "RoPE Sin"): exit()
-
-    # C. Compare Layer Outputs
-    mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
     
-    # Initialize dummy past states for prefill
-    past_states = [None] * len(model_tg.model.layers)
-    
-    for i, layer in enumerate(model_tg.model.layers):
-        h_tg, _ = layer(h_tg, mask, past_states[i], (cos_tg, sin_tg))
-        if i + 1 == len(model_tg.model.layers):
-            h_tg = model_tg.model.norm(h_tg) # THIS IS IMPORTANT, FINAL LAYER APPLY FINAL NORM BY DEFAULT
-        if not compare_tensors(h_tg, hf_outputs[f"layer_{i}_out"], f"Layer {i} Output"):
+    # A. Run Hugging Face model to get all intermediate states
+    with torch.no_grad():
+        pt_out = model_hf(input_ids_pt, output_hidden_states=True)
+        logits_pt = pt_out.logits
+        # pt_out.hidden_states is a tuple: (initial_embeds, layer_0_out, ...)
+        hidden_states_pt = pt_out.hidden_states
+        
+        # Get RoPE for comparison
+        position_ids = torch.arange(0, seq_len, dtype=torch.long).unsqueeze(0)
+        cos_pt, sin_pt = model_hf.model.pos_emb(hidden_states_pt[0], position_ids)
+
+    # B. Run tinygrad model
+    tg_out = model_tg(input_ids_tg, output_hidden_states=True)
+    logits_tg = tg_out.logits
+    hidden_states_tg = tg_out.hidden_states
+
+    # C. Compare initial embeddings
+    if not compare_tensors(hidden_states_tg[0], hidden_states_pt[0], "Initial Embeddings"): exit()
+
+    # D. Compare RoPE
+    cos_tg_slice = model_tg.model.cos_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
+    sin_tg_slice = model_tg.model.sin_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
+    if not compare_tensors(cos_tg_slice, cos_pt, "RoPE Cos"): exit()
+    if not compare_tensors(sin_tg_slice, sin_pt, "RoPE Sin"): exit()
+
+    # E. Compare Layer Outputs
+    for i in range(config_tg.num_hidden_layers):
+        # HF hidden_states[0] is embedding, hidden_states[i+1] is output of layer i
+        if not compare_tensors(hidden_states_tg[i + 1], hidden_states_pt[i + 1], f"Layer {i} Output"):
             print(f"\n‼️ DIVERGENCE DETECTED AT LAYER {i} ‼️")
             exit()
 
-    logits_tg = model_tg.lm_head(h_tg)
-    if not compare_tensors(logits_tg, hf_outputs["logits"], "Final Logits"): 
+    # F. Compare final logits
+    if not compare_tensors(logits_tg, logits_pt, "Final Logits"): 
         print(f"\n‼️ DIVERGENCE DETECTED AT FINAL LOGITS ‼️")
         exit()    
 

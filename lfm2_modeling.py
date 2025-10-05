@@ -25,6 +25,18 @@ from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
 
+# --- HF-like Model Output ---
+
+@dataclass
+class CausalLMOutputWithPast:
+    """
+    Base class for causal language model (or autoregressive) outputs.
+    Adapted for tinygrad from Hugging Face's CausalLMOutputWithPast.
+    """
+    logits: Tensor
+    past_key_values: Optional[List[Any]] = None
+    hidden_states: Optional[Tuple[Tensor, ...]] = None
+
 # --- Configuration ---
 
 @dataclass
@@ -233,30 +245,35 @@ class LFM2Model:
         self.sin_cache = sin_cache
 
 
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0):
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0, output_hidden_states: bool = False):
         h = self.embed_tokens(input_ids)
         bsz, seq_len, _ = h.shape
+
+        all_hidden_states = (h,) if output_hidden_states else None
+
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         
         # Slice the pre-computed RoPE cache
         cos = self.cos_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
         sin = self.sin_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
         
-        # Replace list comprehension with a proper for loop to chain layers
         new_states_list = []
-        current_h = h # Start with the initial embeddings
+        current_h = h
         
         for i, layer in enumerate(self.layers):
             past_st = past_states[i] if past_states else None
             current_h, new_st = layer(current_h, mask, past_st, (cos, sin))
             new_states_list.append(new_st)
             
-            # Apply the first norm INSIDE the final layer iteration
+            # Apply the final norm INSIDE the final layer iteration
             # This replicates the exact structure from debug_prefilling.py that works.
             if i + 1 == len(self.layers):
                 current_h = self.norm(current_h)
+            
+            if output_hidden_states:
+                all_hidden_states += (current_h,)
         
-        return current_h, new_states_list
+        return current_h, new_states_list, all_hidden_states
 
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
@@ -266,9 +283,20 @@ class LFM2ForCausalLM:
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0):
-        hidden_states, new_states = self.model(input_ids, past_states, start_pos)
-        return self.lm_head(hidden_states), new_states
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, output_hidden_states: bool = False) -> CausalLMOutputWithPast:
+        hidden_states, new_states, all_hidden_states = self.model(
+            input_ids,
+            past_states,
+            start_pos,
+            output_hidden_states=output_hidden_states
+        )
+        logits = self.lm_head(hidden_states)
+
+        return CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=new_states,
+            hidden_states=all_hidden_states
+        )
 
 def _set_tensor(model: Any, key: str, tensor: Tensor):
     attrs = key.split('.')
@@ -358,7 +386,8 @@ def generate(
     start_pos = 0
 
     print("Processing prompt...")
-    logits, past_states = model(input_ids, past_states, start_pos=start_pos)
+    outputs = model(input_ids, past_states, start_pos=start_pos)
+    logits, past_states = outputs.logits, outputs.past_key_values
     start_pos += len(tokens)
 
     next_token_logits = logits[0, -1, :]
@@ -375,7 +404,8 @@ def generate(
 
     for _ in range(max_new_tokens - 1):
         input_ids = Tensor([[next_token_id]])
-        logits, past_states = model(input_ids, past_states, start_pos=start_pos)
+        outputs = model(input_ids, past_states, start_pos=start_pos)
+        logits, past_states = outputs.logits, outputs.past_key_values
         start_pos += 1
 
         next_token_logits = logits[0, -1, :]

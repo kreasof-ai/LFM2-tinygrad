@@ -94,7 +94,9 @@ if __name__ == "__main__":
         cache_hf_prefill = pt_prefill_out.past_key_values
 
     # B. Run tinygrad model
-    logits_tg_prefill, cache_tg_prefill = model_tg(input_ids_tg, start_pos=0)
+    tg_prefill_out = model_tg(input_ids_tg, start_pos=0)
+    logits_tg_prefill = tg_prefill_out.logits
+    cache_tg_prefill = tg_prefill_out.past_key_values
     
     # C. Compare final logits from prefill
     # We only care about the logit for the *next* token
@@ -146,11 +148,13 @@ if __name__ == "__main__":
             cache_hf_decode = pt_decode_out.past_key_values
 
         # D. Run tinygrad model for one step
-        logits_tg_decode, cache_tg_decode = model_tg(
+        tg_decode_out = model_tg(
             input_ids=next_token_tg,
             past_states=current_cache_tg,
             start_pos=current_seq_len
         )
+        logits_tg_decode = tg_decode_out.logits
+        cache_tg_decode = tg_decode_out.past_key_values
 
         # E. Compare the single-token logits
         if not compare_tensors(logits_tg_decode, logits_pt_decode, f"Decode Step {i} - Logits"):
