@@ -401,6 +401,7 @@ def generate(
 
     print("Generating new tokens...")
     print(tokenizer.decode(prompt_tokens), end="", flush=True)
+    print(tokenizer.decode([next_token_id]), end="", flush=True)
 
     for _ in range(max_new_tokens - 1):
         input_ids = Tensor([[next_token_id]])
