@@ -73,13 +73,10 @@ if __name__ == "__main__":
         # The first element of `hidden_states` is the initial embedding
         # `hidden_states[i+1]` is the output of `layer i`
         pt_forward_out = model_hf.model(input_ids_pt, output_hidden_states=True)
-        print(len(pt_forward_out.hidden_states))
         for i in range(config_tg.num_hidden_layers):
             hf_outputs[f"layer_{i}_out"] = pt_forward_out.hidden_states[i + 1]
 
-        # D. Final Norm and Logits
-        hf_outputs["final_norm"] = model_hf.model.embedding_norm(pt_forward_out.hidden_states[-1])
-        hf_outputs["logits"] = model_hf.lm_head(hf_outputs["final_norm"])
+        hf_outputs["logits"] = model_hf.lm_head(pt_forward_out.hidden_states[-1])
 
     # --- 5. Step-by-step forward pass for tinygrad model and compare ---
     print("\n\n--- Starting Step-by-Step tinygrad Comparison ---")
@@ -102,22 +99,14 @@ if __name__ == "__main__":
     for i, layer in enumerate(model_tg.model.layers):
         h_tg, _ = layer(h_tg, mask, past_states[i], (cos_tg, sin_tg))
         if i + 1 == len(model_tg.model.layers):
-            h_tg = model_tg.model.norm(h_tg) # DOUBLE NORM, DON'T DELETE THIS
+            h_tg = model_tg.model.norm(h_tg) # THIS IS IMPORTANT, FINAL LAYER APPLY FINAL NORM BY DEFAULT
         if not compare_tensors(h_tg, hf_outputs[f"layer_{i}_out"], f"Layer {i} Output"):
             print(f"\n‼️ DIVERGENCE DETECTED AT LAYER {i} ‼️")
             exit()
 
-    # --- THE FIX: Replicate the discovered double-norm behavior ---
-    # --- DON'T DELETE THIS ---
-    # After the loop, current_h is the output of the final layer.
-    final_h_tg_normed = model_tg.model.norm(h_tg) # DOUBLE NORM, DON'T DELETE THIS
-    if not compare_tensors(final_h_tg_normed, hf_outputs["final_norm"], "Final Norm Output"):
-        print(f"\n‼️ DIVERGENCE DETECTED AT FINAL NORM ‼️")
-        exit()
-
-    logits_tg = model_tg.lm_head(final_h_tg_normed)
+    logits_tg = model_tg.lm_head(h_tg)
     if not compare_tensors(logits_tg, hf_outputs["logits"], "Final Logits"): 
         print(f"\n‼️ DIVERGENCE DETECTED AT FINAL LOGITS ‼️")
-        exit()
+        exit()    
 
     print("\n🎉🎉🎉 All checks passed! The models match perfectly. 🎉🎉🎉")

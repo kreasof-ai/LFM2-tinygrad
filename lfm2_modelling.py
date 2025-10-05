@@ -224,7 +224,7 @@ class LFM2Model:
         h = self.embed_tokens(input_ids)
         seq_len = h.shape[1]
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
-        cos_sin = self.rotary_emb(h, seq_len, start_pos)
+        cos, sin = self.rotary_emb(h, seq_len, start_pos)
         
         # Replace list comprehension with a proper for loop to chain layers
         new_states_list = []
@@ -232,15 +232,13 @@ class LFM2Model:
         
         for i, layer in enumerate(self.layers):
             past_st = past_states[i] if past_states else None
-            current_h, new_st = layer(current_h, mask, past_st, cos_sin) # Use current_h as input
+            current_h, new_st = layer(current_h, mask, past_st, (cos, sin))
             new_states_list.append(new_st)
             
-        # --- THE FIX: Replicate the discovered double-norm behavior ---
-        # --- DON'T DELETE THIS ---
-        # After the loop, current_h is the output of the final layer.
-        h = self.norm(current_h) # First norm application
-        h = self.norm(h)         # Second norm application
-        # --------------------------------------------------------------
+            # --- FIX: Apply the first norm INSIDE the final layer iteration ---
+            # This replicates the exact structure from compare.py that works.
+            if i + 1 == len(self.layers):
+                current_h = self.norm(current_h)
         
         return h, new_states_list
 
