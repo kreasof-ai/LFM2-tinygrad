@@ -8,9 +8,6 @@ This version is adapted to load pretrained weights from Hugging Face Hub. Not fi
 
     `pip install tinygrad torch transformers huggingface_hub safetensors tqdm`
 
-- Run script:
-
-    `python main.py`
 
 ## Acknowledgment
 

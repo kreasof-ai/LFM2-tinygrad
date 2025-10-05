@@ -2,6 +2,7 @@
 LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
 This version is adapted to load pretrained weights from Hugging Face Hub.
+It includes fixes for stateful convolution caching during generation and uses Conv1d.
 
 Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
 """
@@ -10,7 +11,7 @@ Heavily inspired from https://github.com/kyegomez/LFM2 and official https://gith
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 # Third-party imports
 from huggingface_hub import hf_hub_download
@@ -22,7 +23,8 @@ from transformers import AutoTokenizer
 # tinygrad imports
 from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
-from tinygrad.nn import Conv2d, Embedding, Linear, RMSNorm
+# --- FIX 1: Import Conv1d ---
+from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
 
 # For reproducible tests
 if getenv("SEED"):
@@ -79,34 +81,60 @@ class RotaryPositionalEmbedding:
         self.inv_freq = inv_freq
 
     def __call__(self, x: Tensor, seq_len: int, start_pos: int = 0) -> Tuple[Tensor, Tensor]:
+        # --- FIX: The RoPE calculation must include the batch dimension to match HF ---
+        bsz = x.shape[0]
         t = Tensor.arange(start_pos, start_pos + seq_len, device=x.device).cast(self.inv_freq.dtype)
         freqs = t.reshape(-1, 1) * self.inv_freq.reshape(1, -1)
         emb = Tensor.cat(freqs, freqs, dim=-1)
+
+        # emb shape is (seq_len, dim). Reshape to (1, seq_len, dim) and expand to match batch size.
+        emb = emb.unsqueeze(0).expand(bsz, seq_len, -1)
+
         return emb.cos(), emb.sin()
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
 def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
+# --- FIX 2: Complete rewrite of LFM2ConvOperator to use Conv1d and handle stateful caching ---
 class LFM2ConvOperator:
-    """ The actual convolution operator part of a conv block """
+    """ The actual convolution operator part of a conv block, now with caching. """
     def __init__(self, config: LFM2Config):
+        self.hidden_size = config.hidden_size
+        self.kernel_size = config.conv_kernel_size
         self.in_proj = Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
-        self.conv = Conv2d(config.hidden_size, config.hidden_size,
-                           kernel_size=(config.conv_kernel_size, 1),
-                           padding=0,
-                           groups=config.hidden_size, bias=False)
+        self.conv = Conv1d(
+            in_channels=config.hidden_size,
+            out_channels=config.hidden_size,
+            kernel_size=self.kernel_size,
+            padding=self.kernel_size - 1, # Causal padding
+            groups=config.hidden_size,
+            bias=False
+        )
         self.out_proj = Linear(config.hidden_size, config.hidden_size, bias=False)
 
-    def __call__(self, x: Tensor) -> Tensor:
+    def __call__(self, x: Tensor, past_conv_state: Optional[Tensor]) -> Tuple[Tensor, Tensor]:
+        bsz, seq_len, _ = x.shape
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
         x_gated = B * x_proj
 
-        x_conv = x_gated.permute(0, 2, 1).unsqueeze(3)
-        pad_arg = ((0, 0), (0, 0), (self.conv.kernel_size[0] - 1, 0), (0, 0))
-        x_conv = x_conv.pad(pad_arg)
-        x_conv = self.conv(x_conv).squeeze(3).permute(0, 2, 1)
+        # Switch from (bsz, seq_len, hidden_size) to (bsz, hidden_size, seq_len) for Conv1d
+        x_gated_permuted = x_gated.permute(0, 2, 1)
 
-        return self.out_proj(C * x_conv)
+        if seq_len > 1: # Prefill stage
+            conv_out = self.conv(x_gated_permuted)[:, :, :seq_len]
+            # The new conv_state is the last (kernel_size - 1) elements of the input
+            new_conv_state = x_gated_permuted[:, :, -(self.kernel_size - 1):]
+        else: # Generation stage (seq_len == 1)
+            assert past_conv_state is not None, "past_conv_state must be provided for single-token generation"
+            # Concatenate past state with current input
+            conv_input = Tensor.cat(past_conv_state, x_gated_permuted, dim=2)
+            conv_out = self.conv(conv_input)[:, :, -1:]
+            # The new state is the concatenated input
+            new_conv_state = conv_input
+
+        conv_out = conv_out.permute(0, 2, 1)
+        output = self.out_proj(C * conv_out)
+        return output, new_conv_state
 
 class GroupedQueryAttention:
     """ Attention with QK Norm """
@@ -125,7 +153,7 @@ class GroupedQueryAttention:
         self.q_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]], cos_sin: Tuple[Tensor, Tensor]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor, Tensor]], cos_sin: Tuple[Tensor, Tensor]):
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
@@ -140,7 +168,7 @@ class GroupedQueryAttention:
         if past_key_value is not None:
             key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
             value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
-        past_key_value = (key_states, value_states)
+        present_key_value = (key_states, value_states)
 
         key_states = key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
         value_states = value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
@@ -150,7 +178,7 @@ class GroupedQueryAttention:
 
         attn_weights = attn_weights.softmax(-1).cast(query_states.dtype)
         attn_output = (attn_weights @ value_states).permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
-        return self.out_proj(attn_output), past_key_value
+        return self.out_proj(attn_output), present_key_value
 
 class SwiGLU:
     def __init__(self, hidden_size: int, intermediate_size: int):
@@ -173,66 +201,63 @@ class LFM2DecoderLayer:
         else:
             self.operator = LFM2ConvOperator(config)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor]], cos_sin: Tuple[Tensor, Tensor]):
+    # --- FIX 3: Update call signature to handle generic past_state ---
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor]):
         residual = hidden_states
-        normed_h = self.operator_norm(hidden_states)
 
         if self.is_attention_block:
-            operator_out, new_kv_cache = self.operator(normed_h, attention_mask, past_key_value, cos_sin)
+            hidden_states, new_state = self.operator(self.operator_norm(hidden_states), attention_mask, past_state, cos_sin)
         else:
-            operator_out = self.operator(normed_h)
-            new_kv_cache = None
+            # past_state is the conv cache tensor for this layer
+            hidden_states, new_state = self.operator(self.operator_norm(hidden_states), past_state)
 
-        h = residual + operator_out
-        residual = h
-        normed_h = self.ffn_norm(h)
-        ffn_out = self.feed_forward(normed_h)
-        h = residual + ffn_out
+        hidden_states = hidden_states + residual
+        hidden_states = hidden_states + self.feed_forward(self.ffn_norm(hidden_states))
 
-        return h, new_kv_cache
+        return hidden_states, new_state
 
 class LFM2Model:
     def __init__(self, config: LFM2Config):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-        self.layers = []
-        for i in range(config.num_hidden_layers):
-            is_attention = i in config.full_attn_idxs
-            self.layers.append(LFM2DecoderLayer(config, is_attention_block=is_attention))
-            print(f"Layer {i}: {'LFM2DecoderLayer (Attention)' if is_attention else 'LFM2DecoderLayer (Convolution)'}")
+        self.layers = [LFM2DecoderLayer(config, i in config.full_attn_idxs) for i in range(config.num_hidden_layers)]
         self.rotary_emb = RotaryPositionalEmbedding(config.hidden_size // config.num_attention_heads, config.rope_theta)
 
-    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]], start_pos: int = 0):
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0):
         h = self.embed_tokens(input_ids)
         seq_len = h.shape[1]
-
-        mask = None
-        if seq_len > 1:
-            mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize()
-
+        mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         cos_sin = self.rotary_emb(h, seq_len, start_pos)
-
-        new_kv_caches = []
+        
+        # --- FIX: Replace list comprehension with a proper for loop to chain layers ---
+        new_states_list = []
+        current_h = h # Start with the initial embeddings
+        
         for i, layer in enumerate(self.layers):
-            past_kv = past_key_values[i] if past_key_values is not None else None
-            h, new_kv = layer(h, mask, past_kv, cos_sin)
-            new_kv_caches.append(new_kv)
-
-        h = self.norm(h)
-
-        return h, new_kv_caches
+            past_st = past_states[i] if past_states else None
+            current_h, new_st = layer(current_h, mask, past_st, cos_sin) # Use current_h as input
+            new_states_list.append(new_st)
+            
+        # --- THE FIX: Replicate the discovered double-norm behavior ---
+        # After the loop, current_h is the output of the final layer.
+        h = self.norm(current_h) # First norm application
+        h = self.norm(h)         # Second norm application
+        # -----------------------------------------------------------
+        
+        return h, new_states_list
 
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
+        self.config = config  # <-- ADD THIS LINE
         self.model = LFM2Model(config)
         self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def __call__(self, input_ids: Tensor, past_key_values: Optional[List[Tuple[Tensor]]] = None, start_pos: int = 0):
-        hidden_states, new_kv_caches = self.model(input_ids, past_key_values, start_pos)
-        return self.lm_head(hidden_states), new_kv_caches
+    # --- FIX 6: Update call signature and docstrings ---
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0):
+        hidden_states, new_states = self.model(input_ids, past_states, start_pos)
+        return self.lm_head(hidden_states), new_states
 
 def _set_tensor(model: Any, key: str, tensor: Tensor):
     attrs = key.split('.')
@@ -248,8 +273,9 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
     local_path = hf_hub_download(repo_id=repo_id, filename=filename)
 
     key_map = {
-        "model.embed_tokens.weight": "model.embed_tokens.weight",
+        # --- FIX 7: HF model calls final norm `embedding_norm` ---
         "model.embedding_norm.weight": "model.norm.weight",
+        "model.embed_tokens.weight": "model.embed_tokens.weight",
     }
     for i, layer in enumerate(model.model.layers):
         prefix_hf = f"model.layers.{i}"
@@ -287,9 +313,14 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
             pt_tensor = f.get_tensor(hf_key)
             np_array = pt_tensor.to(torch.float32).numpy()
             tensor_tg = Tensor(np_array, requires_grad=False)
-            if 'conv.conv.weight' in hf_key:
-                tensor_tg = tensor_tg.unsqueeze(-1)
+            # --- FIX 8: Remove the unsqueeze hack, as we now use Conv1d ---
+            # if 'conv.conv.weight' in hf_key:
+            #     tensor_tg = tensor_tg.unsqueeze(-1)
             _set_tensor(model, tg_key, tensor_tg)
+
+    print("Re-tying word embeddings for lm_head...")
+    model.lm_head.weight = model.model.embed_tokens.weight
+
     print("All weights loaded and assigned.")
 
 
@@ -302,19 +333,31 @@ def generate(
 ) -> str:
     Tensor.training = False
     print("\n--- Starting Text Generation ---")
-    print(f"Prompt: {prompt}")
+    # --- THE FIX: Use the tokenizer's chat template ---
+    # 1. Format the prompt into the standard message structure.
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
 
-    prompt_tokens = tokenizer.encode(prompt)
-    if tokenizer.bos_token_id and prompt_tokens[0] != tokenizer.bos_token_id:
-        prompt_tokens = [tokenizer.bos_token_id] + prompt_tokens
+    # 2. Apply the template. This adds all necessary special tokens (BOS, user/assistant roles, etc.)
+    #    and prepares the model to generate a response.
+    prompt_tokens = tokenizer.apply_chat_template(
+        messages, 
+        add_generation_prompt=True, # Crucial for telling the model to start its turn
+        tokenize=True
+    )
+    # ---------------------------------------------------
 
+    print(f"Formatted Prompt (decoded): {tokenizer.decode(prompt_tokens)}")
+    
     tokens = [t for t in prompt_tokens]
     input_ids = Tensor([tokens])
-    past_key_values = [None] * len(model.model.layers)
+    # --- FIX 9: Initialize past_states correctly for both operator types ---
+    past_states = [None] * len(model.model.layers)
     start_pos = 0
 
     print("Processing prompt...")
-    logits, past_key_values = model(input_ids, past_key_values, start_pos=start_pos)
+    logits, past_states = model(input_ids, past_states, start_pos=start_pos)
     start_pos += len(tokens)
 
     next_token_logits = logits[0, -1, :]
@@ -331,7 +374,7 @@ def generate(
 
     for _ in trange(max_new_tokens - 1):
         input_ids = Tensor([[next_token_id]])
-        logits, past_key_values = model(input_ids, past_key_values, start_pos=start_pos)
+        logits, past_states = model(input_ids, past_states, start_pos=start_pos)
         start_pos += 1
 
         next_token_logits = logits[0, -1, :]
@@ -343,7 +386,7 @@ def generate(
             next_token_id = (probs.cumsum() > sample).argmax().item()
 
         tokens.append(next_token_id)
-        # print(tokenizer.decode([next_token_id]), end="", flush=True)
+        print(tokenizer.decode([next_token_id]), end="", flush=True) # --- Improvement: print token by token ---
         if next_token_id == tokenizer.eos_token_id:
             break
 
@@ -362,7 +405,10 @@ if __name__ == "__main__":
 
     config = LFM2Config.from_hf_config(config_dict)
     print("\nModel configuration:")
-    print(config)
+    # --- FIX 10: Print layer types for verification ---
+    for i in range(config.num_hidden_layers):
+        is_attention = i in config.full_attn_idxs
+        print(f"Layer {i}: {'Attention' if is_attention else 'Convolution'}")
 
     # 2. Initialize the model structure
     print("\nInitializing model architecture...")
@@ -381,7 +427,7 @@ if __name__ == "__main__":
         model,
         tokenizer,
         prompt,
-        max_new_tokens=20,
+        max_new_tokens=50, # Increased for a better demo
         temperature=0.3
     )
 
