@@ -48,6 +48,3 @@ if __name__ == "__main__":
         max_new_tokens=50,
         temperature=0.3
     )
-
-    print("\nFinal generated text:")
-    print(generated_text)

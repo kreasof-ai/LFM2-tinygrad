@@ -364,7 +364,7 @@ def generate(
     print("Generating new tokens...")
     print(tokenizer.decode(prompt_tokens), end="", flush=True)
 
-    for _ in trange(max_new_tokens - 1):
+    for _ in range(max_new_tokens - 1):
         input_ids = Tensor([[next_token_id]])
         logits, past_states = model(input_ids, past_states, start_pos=start_pos)
         start_pos += 1
