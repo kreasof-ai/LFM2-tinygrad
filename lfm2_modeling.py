@@ -70,22 +70,14 @@ class LFM2Config:
             rope_theta=config_dict["rope_theta"],
         )
 
-class RotaryPositionalEmbedding:
-    def __init__(self, dim: int, base: float):
-        inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtypes.float32) / dim))
-        self.inv_freq = inv_freq
-
-    def __call__(self, x: Tensor, seq_len: int, start_pos: int = 0) -> Tuple[Tensor, Tensor]:
-        # The RoPE calculation must include the batch dimension to match HF
-        bsz = x.shape[0]
-        t = Tensor.arange(start_pos, start_pos + seq_len, device=x.device).cast(self.inv_freq.dtype)
-        freqs = t.reshape(-1, 1) * self.inv_freq.reshape(1, -1)
-        emb = Tensor.cat(freqs, freqs, dim=-1)
-
-        # emb shape is (seq_len, dim). Reshape to (1, seq_len, dim) and expand to match batch size.
-        emb = emb.unsqueeze(0).expand(bsz, seq_len, -1)
-
-        return emb.cos(), emb.sin()
+def _precompute_rope_cache(dim: int, max_seq_len: int, base: float) -> Tuple[Tensor, Tensor]:
+    """Pre-computes the rotary positional embeddings for the given dimensions."""
+    inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtypes.float32) / dim))
+    t = Tensor.arange(max_seq_len, dtype=inv_freq.dtype)
+    freqs = t.reshape(-1, 1) * inv_freq.reshape(1, -1)
+    emb = Tensor.cat(freqs, freqs, dim=-1)
+    # Return as two separate tensors for cos and sin
+    return emb.cos().contiguous(), emb.sin().contiguous()
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
 def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
@@ -229,13 +221,26 @@ class LFM2Model:
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layers = [LFM2DecoderLayer(config, i in config.full_attn_idxs) for i in range(config.num_hidden_layers)]
-        self.rotary_emb = RotaryPositionalEmbedding(config.hidden_size // config.num_attention_heads, config.rope_theta)
+        
+        # Pre-compute RoPE cache
+        head_dim = config.hidden_size // config.num_attention_heads
+        cos_cache, sin_cache = _precompute_rope_cache(
+            dim=head_dim,
+            max_seq_len=config.max_position_embeddings,
+            base=config.rope_theta
+        )
+        self.cos_cache = cos_cache
+        self.sin_cache = sin_cache
+
 
     def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0):
         h = self.embed_tokens(input_ids)
-        seq_len = h.shape[1]
+        bsz, seq_len, _ = h.shape
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
-        cos, sin = self.rotary_emb(h, seq_len, start_pos)
+        
+        # Slice the pre-computed RoPE cache
+        cos = self.cos_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
+        sin = self.sin_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
         
         # Replace list comprehension with a proper for loop to chain layers
         new_states_list = []
@@ -345,8 +350,6 @@ def generate(
         add_generation_prompt=True,
         tokenize=True
     )
-
-    print(f"Formatted Prompt (decoded): {tokenizer.decode(prompt_tokens)}")
     
     tokens = [t for t in prompt_tokens]
     input_ids = Tensor([tokens])
