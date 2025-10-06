@@ -1,3 +1,5 @@
+# src/model/lfm2_modeling.py
+
 """
 LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
@@ -34,6 +36,7 @@ class CausalLMOutputWithPast:
     Adapted for tinygrad from Hugging Face's CausalLMOutputWithPast.
     """
     logits: Tensor
+    loss: Optional[Tensor] = None
     past_key_values: Optional[List[Any]] = None
     hidden_states: Optional[Tuple[Tensor, ...]] = None
 
@@ -253,9 +256,14 @@ class LFM2Model:
 
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         
-        # Slice the pre-computed RoPE cache
-        cos = self.cos_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
-        sin = self.sin_cache[start_pos : start_pos + seq_len].unsqueeze(0).expand(bsz, -1, -1)
+        # --- FIX START ---
+        # Slice the pre-computed RoPE cache and reshape for broadcasting
+        # The target shape is (bsz, 1, seq_len, head_dim) which allows it to
+        # broadcast correctly with query/key tensors of shape (bsz, num_heads, seq_len, head_dim)
+        head_dim = self.cos_cache.shape[-1]
+        cos = self.cos_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
+        sin = self.sin_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
+        # --- FIX END ---
         
         new_states_list = []
         current_h = h
@@ -283,7 +291,7 @@ class LFM2ForCausalLM:
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, output_hidden_states: bool = False) -> CausalLMOutputWithPast:
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, output_hidden_states: bool = False, labels: Optional[Tensor] = None) -> CausalLMOutputWithPast:
         hidden_states, new_states, all_hidden_states = self.model(
             input_ids,
             past_states,
@@ -292,7 +300,17 @@ class LFM2ForCausalLM:
         )
         logits = self.lm_head(hidden_states)
 
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :]
+            shift_labels = labels[..., 1:]
+            # Flatten the tokens
+            loss = shift_logits.flatten(0, 1).sparse_categorical_crossentropy(shift_labels.flatten(), ignore_index=-100)
+
+
         return CausalLMOutputWithPast(
+            loss=loss,
             logits=logits,
             past_key_values=new_states,
             hidden_states=all_hidden_states
