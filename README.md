@@ -1,8 +1,24 @@
-# LFM2 (Liquid Foundation Model 2) tinygrad Implementation
+# LFM2 (Liquid Foundation Model 2) with Tinygrad
 
-> This shit works, it's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference.
+- **What is Liquid Foundation Model 2?**
 
-This version is adapted to load pretrained weights from Hugging Face Hub.
+   It's a sequence model architecture from [Liquid AI](https://www.liquid.ai/blog/liquid-foundation-models-v2-our-second-series-of-generative-ai-models) synthesized from [STAR Framework](https://www.liquid.ai/research/automated-architecture-synthesis-via-targeted-evolution). It's combination of specialized short conv layer and [Grouped Query Attention](https://arxiv.org/abs/2305.13245).
+
+- **What is Tinygrad?**
+
+    Tinygrad is a minimalist tensor and deep learning library developed by [George Hotz](https://github.com/geohot) and heavily maintained by [tiny corp](https://tinygrad.org/). Tinygrad offers extreme design simplicity and readibility compared to PyTorch.
+
+    As stated in their official codebase:
+
+    > Due to its extreme simplicity, it is the easiest framework to add new accelerators to, with support for both inference and training. If XLA is CISC, tinygrad is RISC.
+
+- **Does this project actually can run?**
+
+    This shit works. It's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference.
+
+- **What is the goal of this project?**
+
+    Current benefit is mostly educational. Implementing existing architecture in existing software stack (PyTorch) and infrastucture (CUDA) is one thing. But generalize your understanding beyond that is completely different territory. This project is a proof of concept that you can transfer cutting edge concept and give you feeling of control that you finally understand to build unique concept from scratch.
 
 ## Get started
 
@@ -46,24 +62,17 @@ All weights loaded and assigned.
 Loading tokenizer...
 
 --- Starting Text Generation ---
-Formatted Prompt (decoded): <|startoftext|><|im_start|>user
-The secret to a long and happy life is<|im_end|>
-<|im_start|>assistant
-
 Processing prompt...
 Generating new tokens...
 <|startoftext|><|im_start|>user
 The secret to a long and happy life is<|im_end|>
 <|im_start|>assistant
- secret to a long and happy life often involves a combination of several key elements, including:
+The secret to a long and happy life is often attributed to a combination of several key elements, including:
 
-1. **Health and Well-being**: Regular exercise, a balanced diet, adequate sleep, and stress management are crucial. Physical health directly impacts mental
+1. **Health and Well-being**: Maintaining good physical health through regular exercise, a balanced diet, and adequate sleep is crucial.
+
+--- Generation Complete ---
 ```
-
-
-## Acknowledgment
-
-> Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
 
 ## Paged Attention
 
@@ -403,3 +412,7 @@ And this when it's applied after layer 15:
 
 ‼️ DIVERGENCE DETECTED AT LAYER 15 ‼️
 ```
+
+## Acknowledgment
+
+> Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
