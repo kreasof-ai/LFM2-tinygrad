@@ -24,7 +24,7 @@
 
 - Install dependencies:
 
-    `pip install tinygrad torch transformers huggingface_hub safetensors tqdm`
+    `pip install tinygrad torch transformers huggingface_hub safetensors tqdm datasets`
 
 - Starts `run.py`:
 
