@@ -60,13 +60,11 @@ class LFM2Config:
     initializer_range: float = 0.02
     attention_dropout: float = 0.0
     hidden_dropout: float = 0.0
-    ### FP16 CHANGE ### - Add dtypes for mixed precision
-    param_dtype: Any = dtypes.float32  # Dtype for embeddings and lm_head
+    param_dtype: Any = dtypes.float32  # Dtype for embeddings
     compute_dtype: Any = dtypes.float16 # Dtype for computations and most weights
 
     @classmethod
     def from_hf_config(cls, config_dict: dict) -> "LFM2Config":
-        """Creates a config instance from a Hugging Face config dictionary."""
         intermediate_size = config_dict.get("block_ff_dim", config_dict.get("intermediate_size"))
 
         if config_dict.get("block_auto_adjust_ff_dim", False):
@@ -88,18 +86,15 @@ class LFM2Config:
             rope_theta=config_dict["rope_theta"],
         )
 
-### FP16 CHANGE ### - Replace tinygrad's RMSNorm with one that upcasts for stability
 class RMSNorm:
     def __init__(self, dim, eps=1e-5):
         self.eps = eps
         self.weight = Tensor.ones(dim)
 
     def __call__(self, x: Tensor) -> Tensor:
-        # upcast for precision stability in normalization
         return (x * (x.cast(dtypes.float32).pow(2).mean(-1, keepdim=True) + self.eps).rsqrt()).cast(x.dtype) * self.weight
 
 def _precompute_rope_cache(dim: int, max_seq_len: int, base: float) -> Tuple[Tensor, Tensor]:
-    """Pre-computes the rotary positional embeddings for the given dimensions."""
     inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtypes.float32) / dim))
     t = Tensor.arange(max_seq_len, dtype=inv_freq.dtype)
     freqs = t.reshape(-1, 1) * inv_freq.reshape(1, -1)
@@ -108,10 +103,7 @@ def _precompute_rope_cache(dim: int, max_seq_len: int, base: float) -> Tuple[Ten
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
 
-### FP16 CHANGE ### - Apply RoPE in float32 for precision
 def apply_rotary_pos_emb(q, k, cos, sin):
-    # q, k are in compute_dtype (e.g., float16), cos/sin are float32
-    # Cast q, k to float32 for the operation, then cast back
     q_fp32 = q.cast(dtypes.float32)
     k_fp32 = k.cast(dtypes.float32)
     q_rotated = (q_fp32 * cos) + (rotate_half(q_fp32) * sin)
@@ -145,7 +137,6 @@ class LFM2ConvOperator:
             conv_out = self.conv(x_gated_permuted)[:, :, :seq_len]
             if seq_len < self.kernel_size:
                 pad_amount = self.kernel_size - seq_len
-                ### FP16 CHANGE ### - Ensure padding tensor matches compute dtype
                 padding = Tensor.zeros(bsz, self.hidden_size, pad_amount, device=x.device, dtype=x.dtype)
                 new_conv_state = Tensor.cat(padding, x_gated_permuted, dim=2)
             else:
@@ -159,7 +150,6 @@ class LFM2ConvOperator:
 
         conv_out = conv_out.permute(0, 2, 1)
         output = self.out_proj(C * conv_out)
-        ### FP16 CHANGE ### - Ensure cache is in compute dtype
         return output, new_conv_state.realize()
 
 class GroupedQueryAttention:
@@ -192,7 +182,6 @@ class GroupedQueryAttention:
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
-            ### FP16 CHANGE ### - Ensure cache concatenation is with the correct dtype
             key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
             value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
         present_key_value = (key_states.realize(), value_states.realize())
@@ -242,7 +231,6 @@ class LFM2DecoderLayer:
 
 class LFM2Model:
     def __init__(self, config: LFM2Config):
-        ### FP16 CHANGE ### - Store config for later dtype access
         self.config = config
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -258,11 +246,10 @@ class LFM2Model:
         self.sin_cache = sin_cache
 
     def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0, output_hidden_states: bool = False):
-        ### FP16 CHANGE ### - Embedding output is float32
         h = self.embed_tokens(input_ids)
         bsz, seq_len, _ = h.shape
 
-        ### FP16 CHANGE ### - Cast to compute_dtype after embeddings
+        ### TRAINING FIX: Cast to compute_dtype ONCE after embedding ###
         h = h.cast(self.config.compute_dtype)
 
         all_hidden_states = (h.cast(dtypes.float32),) if output_hidden_states else None
@@ -270,7 +257,6 @@ class LFM2Model:
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         
         head_dim = self.cos_cache.shape[-1]
-        ### FP16 CHANGE ### - RoPE cache remains float32, no change needed here
         cos = self.cos_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
         sin = self.sin_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
         
@@ -286,11 +272,10 @@ class LFM2Model:
                 current_h = self.norm(current_h)
             
             if output_hidden_states:
-                ### FP16 CHANGE ### - Cast hidden states back to float32 for storage
                 all_hidden_states += (current_h.cast(dtypes.float32),)
         
-        ### FP16 CHANGE ### - Cast final output back to param_dtype for lm_head
-        return current_h.cast(self.config.param_dtype), new_states_list, all_hidden_states
+        ### TRAINING FIX: REMOVED cast back to float32. Output will be compute_dtype. ###
+        return current_h, new_states_list, all_hidden_states
 
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
@@ -307,12 +292,13 @@ class LFM2ForCausalLM:
             start_pos,
             output_hidden_states=output_hidden_states
         )
-        ### FP16 CHANGE ### - hidden_states is now float32, lm_head operates in float32
+        ### TRAINING FIX: Logits are now computed in compute_dtype to keep graph intact ###
         logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :]
+            # For stability, loss calculation should be in float32
+            shift_logits = logits[..., :-1, :].cast(dtypes.float32)
             shift_labels = labels[..., 1:]
             loss = shift_logits.flatten(0, 1).sparse_categorical_crossentropy(shift_labels.flatten(), ignore_index=-100)
 
@@ -336,7 +322,6 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
     print(f"Fetching weights from {repo_id}/{filename}...")
     local_path = hf_hub_download(repo_id=repo_id, filename=filename)
 
-    ### FP16 CHANGE ### - Get dtypes from config
     compute_dtype = model.config.compute_dtype
     param_dtype = model.config.param_dtype
 
@@ -421,8 +406,9 @@ def generate(
     start_pos = 0
 
     print("Processing prompt...")
+    # During inference, we cast the final logits back to float32 for sampling stability
     outputs = model(input_ids, past_states, start_pos=start_pos)
-    logits, past_states = outputs.logits, outputs.past_key_values
+    logits, past_states = outputs.logits.cast(dtypes.float32), outputs.past_key_values
     start_pos += len(tokens)
 
     next_token_logits = logits[0, -1, :]
@@ -441,7 +427,7 @@ def generate(
     for _ in range(max_new_tokens - 1):
         input_ids = Tensor([[next_token_id]])
         outputs = model(input_ids, past_states, start_pos=start_pos)
-        logits, past_states = outputs.logits, outputs.past_key_values
+        logits, past_states = outputs.logits.cast(dtypes.float32), outputs.past_key_values
         start_pos += 1
 
         next_token_logits = logits[0, -1, :]
