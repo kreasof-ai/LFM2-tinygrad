@@ -14,7 +14,7 @@
 
     This shit works. It's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference. 
     
-    Unironically, training is much faster than you think (and even faster than inference) because training loop only require fixed size shape kernel. Training speed can vary between cards, but in our testing with RX 6700 XT (max_length=512,bsz=2,max_steps=100) can be done in 4 minutes 20 seconds with 10/12GB memory utilization.
+    Unironically, training is much faster than you think (and even faster than inference) because training loop only require fixed size shape kernel. Training speed can vary between cards, but in our testing with RX 6700 XT (max_length=512,bsz=2,max_steps=100), it can be done in 4m 20s (and even faster after first compilation) with around 10.1/12GB memory utilization. This suggest Tinygrad is actually reasonably fast after compilation.
 
 - **What is the goal of this project?**
 

@@ -3,14 +3,12 @@
 import json
 import argparse
 from tqdm import tqdm
-import numpy as np
+import random
 
 # Third-party imports
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 from datasets import load_dataset
-import torch # Using torch dataloader for convenience
-from torch.utils.data import DataLoader, Dataset
 
 # tinygrad imports
 from tinygrad import Tensor, Device, dtypes, TinyJit
@@ -29,48 +27,80 @@ PROMPT_TEMPLATE = (
     "Write a response that appropriately completes the request.\n\n"
     "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:\n"
 )
+IGNORE_INDEX = -100
 
-class SFTDataset(Dataset):
-    def __init__(self, data, tokenizer, max_length):
-        self.data = data
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.IGNORE_INDEX = -100
+def data_generator(dataset, tokenizer, max_length, batch_size):
+    """
+    A custom data generator that processes, tokenizes, and batches data,
+    yielding tinygrad Tensors directly.
+    """
+    # Shuffle the dataset indices for each epoch
+    indices = list(range(len(dataset)))
+    random.shuffle(indices)
 
-    def __len__(self):
-        return len(self.data)
+    for i in range(0, len(indices), batch_size):
+        batch_indices = indices[i:i+batch_size]
+        # Skip the last batch if it's smaller than the batch size, as TinyJit requires fixed shapes
+        if len(batch_indices) < batch_size:
+            continue
 
-    def __getitem__(self, idx):
-        item = self.data[idx]
+        batch_data = dataset[batch_indices]
         
-        # Format the prompt
-        if item.get("input", ""):
-            prompt = PROMPT_TEMPLATE.format(instruction=item["instruction"], input=item["input"])
-        else:
-            prompt = PROMPT_TEMPLATE.format(instruction=item["instruction"], input="")
+        prompts = []
+        full_texts = []
         
-        full_text = prompt + item["output"]
-        
-        # Tokenize
-        prompt_ids = self.tokenizer.encode(prompt)
-        full_ids = self.tokenizer.encode(full_text + self.tokenizer.eos_token)
-        
-        # Create labels, masking out the prompt part
-        labels = list(np.full(len(prompt_ids), self.IGNORE_INDEX)) + full_ids[len(prompt_ids):]
-        
-        # Pad/truncate
-        input_ids = full_ids[:self.max_length]
-        labels = labels[:self.max_length]
-        
-        padding_len = self.max_length - len(input_ids)
-        if padding_len > 0:
-            input_ids = input_ids + [self.tokenizer.pad_token_id] * padding_len
-            labels = labels + [self.IGNORE_INDEX] * padding_len
+        for j in range(batch_size):
+            item = {key: val[j] for key, val in batch_data.items()}
             
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-        }
+            prompt_input = item.get("input", "")
+            prompt = PROMPT_TEMPLATE.format(instruction=item["instruction"], input=prompt_input)
+            full_text = prompt + item["output"] + tokenizer.eos_token
+            
+            prompts.append(prompt)
+            full_texts.append(full_text)
+
+        # Batch tokenize the full texts with padding and truncation
+        full_tokenized = tokenizer(
+            full_texts,
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors=None, # Return Python lists
+        )
+
+        # Batch tokenize prompts to get their lengths for masking
+        prompt_tokenized = tokenizer(
+            prompts,
+            max_length=max_length,
+            truncation=True,
+            return_tensors=None,
+        )
+
+        input_ids_batch = full_tokenized['input_ids']
+        labels_batch = []
+
+        # Create labels for each item in the batch
+        for j in range(batch_size):
+            prompt_len = len(prompt_tokenized['input_ids'][j])
+            
+            # Start with a copy of the input_ids
+            labels = list(input_ids_batch[j])
+            
+            # Mask the prompt part
+            labels[:prompt_len] = [IGNORE_INDEX] * prompt_len
+            
+            # Mask padding tokens in the labels
+            for k in range(len(labels)):
+                if input_ids_batch[j][k] == tokenizer.pad_token_id:
+                    labels[k] = IGNORE_INDEX
+            
+            labels_batch.append(labels)
+            
+        # Yield a batch of tinygrad tensors
+        yield (
+            Tensor(input_ids_batch, dtype=dtypes.int32, device=Device.DEFAULT),
+            Tensor(labels_batch, dtype=dtypes.int32, device=Device.DEFAULT)
+        )
 
 # --- Training ---
 
@@ -100,9 +130,6 @@ def main(args):
     if args.max_samples is not None:
         dataset = dataset.select(range(args.max_samples))
 
-    train_dataset = SFTDataset(dataset, tokenizer, args.max_length)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(get_parameters(model), lr=args.learning_rate)
 
@@ -114,32 +141,26 @@ def main(args):
         loss = output.loss
         loss.backward()
         optim.step()
-        return loss
+        return loss.realize() # Realize loss for item() call and graph execution
 
     # 4. Training Loop
     print("\n--- Starting Training ---")
-    step = 0
-    for epoch in range(args.num_epochs):
-        print(f"Epoch {epoch + 1}/{args.num_epochs}")
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-        for batch in pbar:
-            # Convert torch tensors to tinygrad tensors
-            input_ids = Tensor(batch['input_ids'].numpy(), dtype=dtypes.int32, device=Device.DEFAULT)
-            labels = Tensor(batch['labels'].numpy(), dtype=dtypes.int32, device=Device.DEFAULT)
-            
-            GlobalCounters.reset()
-            loss = train_step(input_ids, labels)
-            
-            # Realize the loss to trigger computation and get its value
-            loss_val = loss.item()
-            pbar.set_postfix({"loss": f"{loss_val:.4f}"})
-            
-            step += 1
-            if step >= args.max_steps:
-                break
-        if step >= args.max_steps:
-            print(f"Reached max_steps ({args.max_steps}). Stopping training.")
-            break
+    train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
+    pbar = tqdm(range(args.max_steps), desc="Training")
+    
+    for step in pbar:
+        try:
+            input_ids, labels = next(train_iterator)
+        except StopIteration:
+            print("\nEpoch finished. Re-shuffling and creating new data generator...")
+            train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
+            input_ids, labels = next(train_iterator)
+
+        GlobalCounters.reset()
+        loss = train_step(input_ids, labels)
+        
+        loss_val = loss.item()
+        pbar.set_postfix({"loss": f"{loss_val:.4f}"})
 
     print("\n--- Training Complete ---")
     # TODO: Add model saving logic here if desired
@@ -151,7 +172,6 @@ if __name__ == "__main__":
     parser.add_argument("--max_length", type=int, default=512, help="Fixed sequence length for training")
     parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Optimizer learning rate")
-    parser.add_argument("--num_epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
     parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
     args = parser.parse_args()
