@@ -172,10 +172,8 @@ class GroupedQueryAttention:
         self,
         hidden_states: Tensor,
         attention_mask: Optional[Tensor],
-        # --- MODIFIED ARGUMENT ---
         paged_kv_cache: PagedKVCache,
         cos_sin: Tuple[Tensor, Tensor],
-        # --- NEW ARGUMENTS for paged attention ---
         start_pos: int,
         batch_idx: Tensor,
         seq_lens: List[int],
@@ -195,8 +193,6 @@ class GroupedQueryAttention:
         # Apply RoPE
         cos, sin = cos_sin
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        
-        # --- START: Paged Attention Logic ---
         
         # 1. Update the cache with the new key/value states
         # The shapes need to match what PagedKVCache.update expects
@@ -223,8 +219,6 @@ class GroupedQueryAttention:
 
         # 3. Perform attention
         attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
-        
-        # --- END: Paged Attention Logic ---
 
         attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
         
@@ -359,7 +353,6 @@ class LFM2ForCausalLM:
             seq_lens=seq_lens,
         )
         
-        # *** NEW: Update the internal convolution caches ***
         # The PagedKVCaches are updated in-place, but the conv Tensors must be replaced.
         for i, state in enumerate(new_states):
             if i not in self.config.full_attn_idxs:
@@ -450,7 +443,7 @@ def generate(
     if not isinstance(paged_cache_controller, PagedKVCache):
         raise RuntimeError("Model is not initialized with paged attention caches.")
 
-    # *** NEW: Reset conv caches and then allocate pages ***
+    # Reset conv caches and then allocate pages
     model.reset_request_state()
     try:
         batch_idx_int = paged_cache_controller.page_table.allocate()
@@ -471,8 +464,7 @@ def generate(
         print("Processing prompt...")
         input_ids = Tensor([tokens])
         start_pos = 0
-        
-        # *** SIMPLIFIED: No more manual past_states management ***
+
         outputs = model(
             input_ids, 
             start_pos=start_pos,
@@ -482,7 +474,6 @@ def generate(
         logits = outputs.logits
         start_pos += len(tokens)
 
-        # Sampling logic (unchanged)
         next_token_logits = logits[0, -1, :]
         if temperature == 0:
             next_token_id = next_token_logits.argmax().item()
@@ -500,7 +491,6 @@ def generate(
         for _ in range(max_new_tokens - 1):
             input_ids = Tensor([[next_token_id]])
             
-            # *** SIMPLIFIED: Model call is the same, state is managed internally ***
             outputs = model(
                 input_ids,
                 start_pos=start_pos,
@@ -510,7 +500,6 @@ def generate(
             logits = outputs.logits
             start_pos += 1
 
-            # Sampling logic (unchanged)
             next_token_logits = logits[0, -1, :]
             if temperature == 0:
                 next_token_id = next_token_logits.argmax().item()
