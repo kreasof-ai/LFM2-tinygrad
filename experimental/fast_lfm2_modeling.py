@@ -24,7 +24,7 @@ from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
 
-from paged_attention import PagedKVCache, PageTable
+from experimental.paged_attention import PagedKVCache, PageTable
 
 # --- HF-like Model Output ---
 

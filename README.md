@@ -65,6 +65,92 @@ The secret to a long and happy life is<|im_end|>
 
 > Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
 
+## Paged Attention
+
+Current Paged Attention implementation kinda works, but not doing anything to speedup the inference. It's in fact slightly slower than naive.
+
+```
+Starting LFM2 Inference Speed Test
+Prompt: 'The secret to a long and happy life is'
+Tokens to generate: 128
+tinygrad Device: GPU
+--------------------------------------------------
+
+--- 1. Testing Hugging Face (PyTorch) Reference ---
+Loading model... (This might take a moment)
+`torch_dtype` is deprecated! Use `dtype` instead!
+Generating tokens...
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+Generated Text Sample: The secret to a long and happy life is a combination of various factors, includi...
+Time taken: 4.3388 seconds
+Tokens per second: 29.50 tok/s
+
+--- 2. Testing Naive tinygrad Implementation ---
+Loading model...
+Fetching weights from LiquidAI/LFM2-350M/model.safetensors...
+Loading and assigning weights...
+Re-tying word embeddings for lm_head...
+All weights loaded and assigned.
+Generating tokens...
+
+--- Starting Text Generation ---
+Processing prompt...
+Generating new tokens...
+<|startoftext|><|im_start|>user
+The secret to a long and happy life is<|im_end|>
+<|im_start|>assistant
+The secret to a long and happy life is a combination of various factors, including:
+
+1. **Health and Well-being**: Regular exercise, a balanced diet, and adequate sleep are fundamental.
+2. **Mindfulness and Mental Health**: Practicing mindfulness, meditation, and therapy can help manage stress and maintain emotional balance.
+3. **Relationships**: Strong, supportive relationships with family and friends provide emotional support and a sense of belonging.
+4. **Personal Growth**: Continuous learning and personal development can keep life engaging and fulfilling.
+5. **Purpose and Meaning**: Finding purpose in life through hobbies
+--- Generation Complete ---
+
+Time taken: 343.5441 seconds
+Tokens per second: 0.37 tok/s
+
+--- 3. Testing tinygrad with Paged Attention ---
+Loading model...
+Fetching weights from LiquidAI/LFM2-350M/model.safetensors...
+Loading and assigning weights...
+Re-tying word embeddings for lm_head...
+All weights loaded and assigned.
+Generating tokens...
+
+--- Starting Text Generation ---
+Allocated batch slot: 0
+Reserved memory for a maximum sequence length of 146
+Processing prompt...
+Generating new tokens...
+<|startoftext|><|im_start|>user
+The secret to a long and happy life is<|im_end|>
+<|im_start|>assistant
+The secret to a long and happy life is a combination of various factors, including:
+
+1. **Health and Well-being**: Regular exercise, a balanced diet, and adequate sleep are fundamental.
+2. **Mindfulness and Mental Health**: Practicing mindfulness, meditation, and therapy can help manage stress and maintain emotional balance.
+3. **Relationships**: Strong, supportive relationships with family and friends provide emotional support and a sense of belonging.
+4. **Personal Growth**: Continuous learning and personal development can keep life engaging and fulfilling.
+5. **Purpose and Meaning**: Finding purpose in life through hobbies
+--- Generation Complete ---
+
+Time taken: 364.7106 seconds
+Tokens per second: 0.35 tok/s
+
+
+==================================================
+           INFERENCE SPEED TEST SUMMARY
+==================================================
+Implementation            | Time Taken (s)  | Tokens/sec
+--------------------------------------------------
+Hugging Face (PyTorch)    | 4.3388          | 29.50
+Naive tinygrad            | 343.5441        | 0.37
+Paged tinygrad            | 364.7106        | 0.35
+==================================================
+```
+
 ## Disclaimer
 
 - Empirical test with `debug_prefilling.py` shows huggingface implementation apply final norm inside final layer.
