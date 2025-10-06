@@ -1,7 +1,7 @@
 import json
 # Third-party imports
 from huggingface_hub import hf_hub_download
-from fast_lfm2_modeling import LFM2Config, LFM2ForCausalLM, generate, load_from_hf
+from model.paged_lfm2_modeling import LFM2Config, LFM2ForCausalLM, generate, load_from_hf
 from transformers import AutoTokenizer
 
 # tinygrad imports

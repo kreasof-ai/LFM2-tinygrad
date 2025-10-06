@@ -6,8 +6,8 @@ import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
-from fast_lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
-from paged_attention import PagedKVCache
+from model.paged_lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
+from experimental.paged_attention import PagedKVCache
 
 # --- Comparison Helper (Unchanged) ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):

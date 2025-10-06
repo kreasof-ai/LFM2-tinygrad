@@ -1,4 +1,6 @@
-# /speed_test.py
+import sys
+
+print(sys.path)
 
 import time
 import json
@@ -11,11 +13,7 @@ from tinygrad import Tensor, Device
 from tinygrad.helpers import getenv
 
 # --- Import your implementations ---
-# Naive tinygrad implementation
-import lfm2_modeling as naive_tg
-
-# Paged attention tinygrad implementation
-from experimental import fast_lfm2_modeling as paged_tg
+from model import paged_lfm2_modeling as paged_tg, lfm2_modeling as naive_tg
 
 
 # --- Test Configuration ---

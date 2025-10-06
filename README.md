@@ -28,7 +28,7 @@
 
 - Starts `main.py`:
 
-    `python main.py`
+    `python src/main.py`
 
 - You'll see this output
 
@@ -162,7 +162,7 @@ Paged tinygrad            | 364.7106        | 0.35
 
 ## Disclaimer
 
-- Empirical test with `debug_prefilling.py` shows huggingface implementation apply final norm inside final layer.
+- Empirical test with `src/debug_prefilling.py` shows huggingface implementation apply final norm inside final layer.
 
 This is output when final norm is applied inside layer 15
 
