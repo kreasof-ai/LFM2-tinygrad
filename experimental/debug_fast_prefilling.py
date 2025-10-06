@@ -59,15 +59,14 @@ if __name__ == "__main__":
     seq_len = input_ids_pt.shape[1]
 
     # --- 4. Setup Paged Attention for the single request ---
-    first_attn_idx = model_tg.config.full_attn_idxs[0]
-    controller = model_tg.layer_caches[first_attn_idx]
+    controller = model_tg.page_table
     
     batch_idx_int = -1 # Initialize to ensure it's set
     try:
         model_tg.reset_request_state()
-        batch_idx_int = controller.page_table.allocate()
+        batch_idx_int = controller.allocate()
         batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
-        controller.page_table.reserve(batch_idx_int, seq_len + 1) # Reserve space
+        controller.reserve(batch_idx_int, seq_len + 1) # Reserve space
 
         # 5. Run full forward pass on both models
         print("\n\n--- Starting Step-by-Step tinygrad Comparison ---")
@@ -122,4 +121,4 @@ if __name__ == "__main__":
 
     finally:
         if batch_idx_int != -1:
-            controller.page_table.erase(batch_idx_int)
+            controller.erase(batch_idx_int)

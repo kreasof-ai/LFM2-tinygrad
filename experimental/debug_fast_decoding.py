@@ -76,7 +76,7 @@ def compare_caches(tg_states: list, hf_cache, config: LFM2Config, name: str, bat
             # Convolution layer: compare the tensor directly
             tg_conv_state = tg_states[i]
             # HF cache is a tuple of (k, v) for attn or a single tensor for conv
-            hf_conv_state = hf_cache[i]
+            hf_conv_state = hf_cache.conv_cache[i]
             if not compare_tensors(tg_conv_state, hf_conv_state, f"Layer {i} Conv Cache"): all_match = False
 
         if not all_match:
@@ -109,13 +109,13 @@ if __name__ == "__main__":
     prompt_len = input_ids_pt.shape[1]
 
     # 3. Setup Paged Attention
-    controller = model_tg.layer_caches[model_tg.config.full_attn_idxs[0]]
+    controller = model_tg.page_table
     batch_idx_int = -1
     try:
         model_tg.reset_request_state()
-        batch_idx_int = controller.page_table.allocate()
+        batch_idx_int = controller.allocate()
         batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
-        controller.page_table.reserve(batch_idx_int, MAX_LEN)
+        controller.reserve(batch_idx_int, MAX_LEN)
 
         # --- 4. PREFILL STAGE COMPARISON ---
         print("\n\n--- Starting Prefill Stage Comparison ---")
@@ -172,4 +172,4 @@ if __name__ == "__main__":
     
     finally:
         if batch_idx_int != -1:
-            controller.page_table.erase(batch_idx_int)
+            controller.erase(batch_idx_int)

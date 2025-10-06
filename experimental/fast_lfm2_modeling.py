@@ -188,7 +188,7 @@ class GroupedQueryAttention:
         # Reshape and apply norms
         query_states = query_states.reshape(bsz, q_len, self.num_heads, self.head_dim)
         key_states = key_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
-        value_states = value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        value_states = value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).permute(0, 2, 1, 3)
         query_states = self.q_layernorm(query_states).permute(0, 2, 1, 3)
         key_states = self.k_layernorm(key_states).permute(0, 2, 1, 3)
 
@@ -320,18 +320,19 @@ class LFM2ForCausalLM:
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-        # *** NEW: Unified, Stateful Cache System ***
+        self.page_table = PageTable(
+            n_pages=config.num_pages,
+            page_size=config.page_size,
+            max_batch_size=config.max_batch_size,
+        )
+
         self.layer_caches = [None] * config.num_hidden_layers
         head_dim = config.hidden_size // config.num_attention_heads
         for i in range(config.num_hidden_layers):
             if i in config.full_attn_idxs:
-                page_table = PageTable(
-                    n_pages=config.num_pages,
-                    page_size=config.page_size,
-                    max_batch_size=config.max_batch_size,
-                )
+                # All PagedKVCaches now share the same PageTable instance.
                 self.layer_caches[i] = PagedKVCache(
-                    page_table=page_table,
+                    page_table=self.page_table,
                     num_heads=config.num_key_value_heads,
                     head_dim=head_dim,
                     dtype=dtypes.float32,
