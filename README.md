@@ -16,6 +16,9 @@
     
     Unironically, training is much faster than you think (and even faster than inference) because training loop only require fixed size shape kernel. Training speed can vary between cards, but in our testing with RX 6700 XT (max_length=512,bsz=2,max_steps=100), it can be done in 4m 20s (and even faster after first compilation) with around 10.1/12GB memory utilization. This suggest Tinygrad is actually reasonably fast after compilation.
 
+     <img width="1920" height="1080" alt="Screenshot 2025-10-06 190415" src="https://github.com/user-attachments/assets/861afba5-ab6e-4dff-ab50-424e5cb0a56d" />
+
+
 - **What is the goal of this project?**
 
     Current benefit is mostly educational. Implementing existing architecture in existing software stack (PyTorch) and infrastucture (CUDA) is one thing. But generalize your understanding beyond that is completely different territory. This project is a proof of concept that you can transfer cutting edge concept and give you feeling of control that you finally understand to build unique concept from scratch.
