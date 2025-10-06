@@ -124,36 +124,22 @@ class PageTable:
     def get_physical_addrs(self, batch_indices: Tensor, positions: Tensor) -> Tensor:
         """
         Calculates the physical addresses in the flat cache tensor.
-        Args:
-            batch_indices (Tensor): Shape (B, S). The batch index for each token.
-            positions (Tensor): Shape (B, S). The logical position of each token in its sequence.
-        Returns:
-            Tensor: Shape (B, S). The physical address for each token.
+        This version operates entirely on the device (GPU).
         """
         logical_block_idx = (positions // self.page_size).cast(dtypes.int32)
         logical_block_offset = (positions % self.page_size).cast(dtypes.int32)
+
+        # Flatten the page table to easily index into it.
+        # Shape: (max_batch_size * max_logical_blocks)
+        page_table_flat = self.page_table.flatten()
+        num_logical_blocks_per_row = self.page_table.shape[1]
+
+        # Calculate the flat index for each token's logical block
+        # flat_index = row * num_cols + col
+        flat_indices = batch_indices * num_logical_blocks_per_row + logical_block_idx
         
-        # This part is a gather operation, which is different from scatter and was correct.
-        # It gathers entire rows (the page mappings for each batch item).
-        # selected_tables = self.page_table[batch_indices.flatten().numpy()]
-        
-        # # Now gather the specific page index from each selected row.
-        # # This requires flattening and calculating 1D indices for the gather source.
-        # num_cols = self.page_table.shape[1]
-        
-        # batch_indices determines the row, logical_block_idx determines the column.
-        # This is a bit tricky. We want to do selected_tables[arange(B*S), logical_block_idx.flatten()]
-        # Let's use the CPU table for simplicity and correctness, as this path is not as performance critical
-        # as the scatter update, and avoids complex GPU-side indexing.
-        
-        batch_indices_np = batch_indices.flatten().numpy()
-        logical_block_idx_np = logical_block_idx.flatten().numpy()
-        
-        physical_block_idx_list = [
-            self.page_table_cpu[b_idx][l_idx]
-            for b_idx, l_idx in zip(batch_indices_np, logical_block_idx_np)
-        ]
-        physical_block_idx = Tensor(physical_block_idx_list, dtype=dtypes.int32).reshape(positions.shape)
+        # Gather the physical block indices from the flattened table
+        physical_block_idx = page_table_flat.gather(0, flat_indices.flatten()).reshape(positions.shape)
         
         return (physical_block_idx * self.page_size + logical_block_offset).cast(dtypes.int32)
 
