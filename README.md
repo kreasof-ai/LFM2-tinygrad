@@ -6,15 +6,15 @@
 
 - **What is Tinygrad?**
 
-    Tinygrad is a minimalist tensor and deep learning library developed by [George Hotz](https://github.com/geohot) and heavily maintained by [tiny corp](https://tinygrad.org/). Tinygrad offers extreme design simplicity and readibility compared to PyTorch.
-
-    As stated in their official codebase:
+    Tinygrad is a minimalist tensor and deep learning library developed by [George Hotz](https://github.com/geohot) and heavily maintained by [tiny corp](https://tinygrad.org/). Tinygrad offers extreme design simplicity and readibility compared to PyTorch. As stated in their official codebase:
 
     > Due to its extreme simplicity, it is the easiest framework to add new accelerators to, with support for both inference and training. If XLA is CISC, tinygrad is RISC.
 
 - **Does this project actually can run?**
 
-    This shit works. It's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference.
+    This shit works. It's just very slow and you can't just calling TinyJit because JIT compilation in tinygrad only support fixed size input. We still thinking workaround to speedup the inference. 
+    
+    Unironically, training is much faster than you think (and even faster than inference) because training loop only require fixed size shape kernel. Training speed can vary between cards, but in our testing with RX 6700 XT (max_length=512,bsz=2,max_steps=100) can be done in 4 minutes 20 seconds with 10/12GB memory utilization.
 
 - **What is the goal of this project?**
 
