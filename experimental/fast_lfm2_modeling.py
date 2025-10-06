@@ -525,8 +525,6 @@ def generate(
                 break
 
     finally:
-        # Cleanup (unchanged)
-        print(f"\nCleaning up and erasing batch slot: {batch_idx_int}")
         paged_cache_controller.page_table.erase(batch_idx_int)
 
     print("\n--- Generation Complete ---")
