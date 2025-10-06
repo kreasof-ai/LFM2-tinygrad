@@ -26,9 +26,9 @@
 
     `pip install tinygrad torch transformers huggingface_hub safetensors tqdm`
 
-- Starts `main.py`:
+- Starts `run.py`:
 
-    `python src/main.py`
+    `python src/run.py`
 
 - You'll see this output
 
