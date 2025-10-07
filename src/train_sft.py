@@ -5,6 +5,7 @@ import argparse
 from typing import List
 from tqdm import tqdm
 import random
+import time
 
 # Third-party imports
 from huggingface_hub import hf_hub_download
@@ -20,6 +21,7 @@ from extra.lr_scheduler import CosineAnnealingLR
 
 # Project imports
 from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
+from model.lfm2_modeling import GroupedQueryAttention, LFM2ConvOperator, SwiGLU
 
 # --- Dataset and Preprocessing ---
 
@@ -104,6 +106,41 @@ def data_generator(dataset, tokenizer, max_length, batch_size):
             Tensor(labels_batch, dtype=dtypes.int32, device=Device.DEFAULT)
         )
 
+def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) -> int:
+    """
+    Estimates the FLOPS for a forward/backward pass of the LFM2 model.
+    """
+    config = model.config
+    B, S, H, I, K = batch_size, seq_len, config.hidden_size, config.intermediate_size, config.conv_kernel_size
+
+    fwd_flops = 0
+    
+    # Iterate through each decoder layer
+    for layer in model.model.layers:
+        # 1. Shared MLP (SwiGLU) part
+        # w1, w3, w2 projections
+        fwd_flops += 6 * B * S * H * I
+
+        # 2. Operator part (Attention or Convolution)
+        if isinstance(layer.operator, GroupedQueryAttention):
+            # Q, K, V, O projections (simplified as 4 * H*H)
+            fwd_flops += 4 * B * S * H * H
+            # Attention Score (Q@K^T) and Output (@V)
+            # This is the sequence-length dependent part
+            fwd_flops += 4 * B * (S**2) * H
+        elif isinstance(layer.operator, LFM2ConvOperator):
+            # in_proj (H -> 3H) and out_proj (H -> H)
+            fwd_flops += (2 * B * S * H * (3 * H)) + (2 * B * S * H * H)
+            # Depthwise conv (cheap)
+            fwd_flops += 2 * B * H * S * K
+    
+    # Final layer norm and lm_head
+    fwd_flops += 2 * B * S * config.vocab_size * H
+
+    # Backward pass is ~2x forward pass
+    return 3 * fwd_flops
+
+
 # --- Training ---
 
 def main(args):
@@ -122,12 +159,25 @@ def main(args):
     model = LFM2ForCausalLM(config)
     load_from_hf(model, args.model_id)
     
+    # --- MFU Calculation Setup ---
+    print("\n--- Model & MFU Setup ---")
+    if args.device_peak_flops > 0:
+        total_params = sum(p.numel() for p in get_parameters(model))
+        flops_per_step = estimate_mfu_flops(model, args.batch_size, args.max_length)
+        print(f"  Total Parameters: {total_params / 1e6:.2f}M")
+        print(f"  Sequence Length: {args.max_length}, Batch Size: {args.batch_size}")
+        print(f"  Estimated FLOPS per step (arch-aware): {flops_per_step / 1e12:.2f} TFLOPS")
+        print(f"  Provided Peak Hardware FLOPS: {args.device_peak_flops} TFLOPS")
+    else:
+        flops_per_step = 0
+        print("  Skipping MFU calculation (device_peak_flops not provided).")
+
     # Set model parameters to require gradients
     for p in get_parameters(model):
         p.requires_grad = True
 
     # 2. Load and Prepare Dataset
-    print(f"Loading dataset '{args.dataset_id}'...")
+    print(f"\nLoading dataset '{args.dataset_id}'...")
     dataset = load_dataset(args.dataset_id, split="train")
     if args.max_samples is not None:
         dataset = dataset.select(range(args.max_samples))
@@ -138,7 +188,6 @@ def main(args):
 
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(params, lr=args.learning_rate)
-
     lr_scheduler = CosineAnnealingLR(optim, T_max=args.max_steps) 
 
     @TinyJit
@@ -151,10 +200,12 @@ def main(args):
         
         total_norm = Tensor(0.0, dtype=dtypes.float32, device=optim.params[0].device)
         for p in optim.params:
-            total_norm += p.grad.float().square().sum()
+            if p.grad is not None:
+                total_norm += p.grad.float().square().sum()
         total_norm = total_norm.sqrt().contiguous()
         for p in optim.params:
-            p.grad = p.grad * (args.gradient_clipping_norm / (total_norm + 1e-6)).clamp(max_=1.0)
+            if p.grad is not None:
+                p.grad = p.grad * (args.gradient_clipping_norm / (total_norm + 1e-6)).clamp(max_=1.0)
 
         optim.step()
         lr_scheduler.step()
@@ -167,6 +218,9 @@ def main(args):
     train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
     pbar = tqdm(range(args.max_steps), desc="Training")
     
+    step_times = []
+    warmup_steps = 5 # Ignore first few steps for MFU calc due to JIT compilation
+
     for step in pbar:
         with Tensor.train():
             try:
@@ -176,11 +230,30 @@ def main(args):
                 train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
                 input_ids, labels = next(train_iterator)
 
+            start_time = time.perf_counter()
             GlobalCounters.reset()
             loss, lr = train_step(input_ids, labels)
+            end_time = time.perf_counter()
+            
+            step_time = end_time - start_time
+            if step >= warmup_steps:
+                step_times.append(step_time)
+
+            # MFU calculation
+            mfu_str = "N/A"
+            if flops_per_step > 0 and len(step_times) > 0:
+                avg_step_time = sum(step_times) / len(step_times)
+                achieved_tflops = flops_per_step / avg_step_time / 1e12
+                mfu = achieved_tflops / args.device_peak_flops
+                mfu_str = f"{mfu:.2%}"
             
             loss_val = loss.item()
-            pbar.set_postfix({"loss": f"{loss_val:.4f}", "lr":  f"{lr:.0e}".replace("e-0", "e-")})
+            pbar.set_postfix({
+                "loss": f"{loss_val:.4f}", 
+                "lr":  f"{lr:.0e}".replace("e-0", "e-"),
+                "time": f"{step_time*1000:.2f}ms",
+                "MFU": mfu_str
+            })
 
     print("\n--- Training Complete ---")
     # TODO: Add model saving logic here if desired
@@ -195,5 +268,6 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
     parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
+    parser.add_argument("--device_peak_flops", type=float, default=26.43, help="Peak FP16/BF16 TFLOPS of the training device. E.g., A100: 312, RTX 4090: 330, RX 6700XT: ~23. If -1, MFU is not calculated.")
     args = parser.parse_args()
     main(args)
