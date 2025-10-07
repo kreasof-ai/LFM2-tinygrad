@@ -1,5 +1,8 @@
 # src/train_sft.py
 
+import os
+os.environ["VIZ"] = "1"
+
 import json
 import argparse
 from typing import List
