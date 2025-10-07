@@ -16,6 +16,7 @@ from tinygrad import Tensor, Device, dtypes, TinyJit
 from tinygrad.nn.optim import AdamW
 from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
+from extra.lr_scheduler import CosineAnnealingLRWithWarmup
 
 # Project imports
 from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
@@ -138,10 +139,13 @@ def main(args):
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(params, lr=args.learning_rate)
 
+    lr_scheduler = CosineAnnealingLRWithWarmup(optim, base_lr=args.learning_rate, end_lr=0, warmup_steps=10, decay_steps=90) 
+
     @TinyJit
     def train_step(input_ids: Tensor, labels: Tensor):
         Tensor.training = True
         optim.zero_grad()
+        
         output = model(input_ids, labels=labels)
         loss = output.loss
         loss.cast(dtypes.float32).backward()
@@ -154,7 +158,10 @@ def main(args):
             p.grad = p.grad * (args.gradient_clipping_norm / (total_norm + 1e-6)).clamp(max_=1.0)
 
         optim.step()
-        return loss.realize() # Realize loss for item() call and graph execution
+        lr_scheduler.step()
+        lr = optim.lr
+
+        return loss.realize(lr) # Realize loss for item() call and graph execution
 
     # 4. Training Loop
     print("\n--- Starting Training ---")
