@@ -16,7 +16,7 @@ from tinygrad import Tensor, Device, dtypes, TinyJit
 from tinygrad.nn.optim import AdamW
 from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
-from extra.lr_scheduler import CosineAnnealingLRWithWarmup
+from extra.lr_scheduler import CosineAnnealingLR
 
 # Project imports
 from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
@@ -139,11 +139,10 @@ def main(args):
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(params, lr=args.learning_rate)
 
-    lr_scheduler = CosineAnnealingLRWithWarmup(optim, base_lr=args.learning_rate, end_lr=0, warmup_steps=10, decay_steps=90) 
+    lr_scheduler = CosineAnnealingLR(optim, T_max=args.max_steps) 
 
     @TinyJit
     def train_step(input_ids: Tensor, labels: Tensor):
-        Tensor.training = True
         optim.zero_grad()
         
         output = model(input_ids, labels=labels)
@@ -159,9 +158,9 @@ def main(args):
 
         optim.step()
         lr_scheduler.step()
-        lr = optim.lr
-
-        return loss.realize(lr) # Realize loss for item() call and graph execution
+        loss, out_lr = loss.detach().to("CPU"), optim.lr.to("CPU")
+        Tensor.realize(loss, out_lr)
+        return loss, out_lr.item()
 
     # 4. Training Loop
     print("\n--- Starting Training ---")
@@ -169,18 +168,19 @@ def main(args):
     pbar = tqdm(range(args.max_steps), desc="Training")
     
     for step in pbar:
-        try:
-            input_ids, labels = next(train_iterator)
-        except StopIteration:
-            print("\nEpoch finished. Re-shuffling and creating new data generator...")
-            train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
-            input_ids, labels = next(train_iterator)
+        with Tensor.train():
+            try:
+                input_ids, labels = next(train_iterator)
+            except StopIteration:
+                print("\nEpoch finished. Re-shuffling and creating new data generator...")
+                train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
+                input_ids, labels = next(train_iterator)
 
-        GlobalCounters.reset()
-        loss = train_step(input_ids, labels)
-        
-        loss_val = loss.item()
-        pbar.set_postfix({"loss": f"{loss_val:.4f}"})
+            GlobalCounters.reset()
+            loss, lr = train_step(input_ids, labels)
+            
+            loss_val = loss.item()
+            pbar.set_postfix({"loss": f"{loss_val:.4f}", "lr":  f"{lr:.0e}".replace("e-0", "e-")})
 
     print("\n--- Training Complete ---")
     # TODO: Add model saving logic here if desired
