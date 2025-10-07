@@ -2,6 +2,7 @@
 
 import json
 import argparse
+from typing import List
 from tqdm import tqdm
 import random
 
@@ -17,7 +18,7 @@ from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
 
 # Project imports
-from model.lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
+from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
 
 # --- Dataset and Preprocessing ---
 
@@ -130,8 +131,12 @@ def main(args):
     if args.max_samples is not None:
         dataset = dataset.select(range(args.max_samples))
 
+    params = get_parameters(model)
+    for p in params:
+        p.requires_grad = True
+
     # 3. Setup Optimizer and JIT'd Training Step
-    optim = AdamW(get_parameters(model), lr=args.learning_rate)
+    optim = AdamW(params, lr=args.learning_rate)
 
     @TinyJit
     def train_step(input_ids: Tensor, labels: Tensor):
@@ -139,7 +144,15 @@ def main(args):
         optim.zero_grad()
         output = model(input_ids, labels=labels)
         loss = output.loss
-        loss.backward()
+        loss.cast(dtypes.float32).backward()
+        
+        total_norm = Tensor(0.0, dtype=dtypes.float32, device=optim.params[0].device)
+        for p in optim.params:
+            total_norm += p.grad.float().square().sum()
+        total_norm = total_norm.sqrt().contiguous()
+        for p in optim.params:
+            p.grad = p.grad * (args.gradient_clipping_norm / (total_norm + 1e-6)).clamp(max_=1.0)
+
         optim.step()
         return loss.realize() # Realize loss for item() call and graph execution
 
@@ -171,7 +184,8 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_id", type=str, default="tatsu-lab/alpaca", help="Hugging Face dataset ID for SFT")
     parser.add_argument("--max_length", type=int, default=512, help="Fixed sequence length for training")
     parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
-    parser.add_argument("--learning_rate", type=float, default=2e-5, help="Optimizer learning rate")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Optimizer learning rate")
+    parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
     parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
     args = parser.parse_args()
