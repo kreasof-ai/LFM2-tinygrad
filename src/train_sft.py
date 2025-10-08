@@ -367,8 +367,8 @@ def main(args):
                 wandb.log({
                     "train/loss": loss_val,
                     "train/learning_rate": lr,
+                    "train/grad_norm": grad_norm_val,
                     "perf/step_time_ms": step_time * 1000,
-                    "perf/grad_norm": grad_norm_val,
                     "perf/mfu": mfu,
                     "perf/achieved_tflops": achieved_tflops,
                 }, step=step)
