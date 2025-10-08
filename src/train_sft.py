@@ -28,86 +28,109 @@ from model.lfm2_modeling import GroupedQueryAttention, LFM2ConvOperator, SwiGLU
 
 # --- Dataset and Preprocessing ---
 
-# Alpaca prompt template
-PROMPT_TEMPLATE = (
-    "Below is an instruction that describes a task, paired with an input that provides further context. "
-    "Write a response that appropriately completes the request.\n\n"
-    "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:\n"
-)
 IGNORE_INDEX = -100
 
 def data_generator(dataset, tokenizer, max_length, batch_size):
     """
-    A custom data generator that processes, tokenizes, and batches data,
-    yielding tinygrad Tensors directly.
+    A custom data generator that processes, tokenizes, and batches conversational data,
+    yielding tinygrad Tensors directly. It uses a buffering strategy to ensure full
+    batches for TinyJit and trains the model only on the last assistant response in a conversation.
     """
     # Shuffle the dataset indices for each epoch
     indices = list(range(len(dataset)))
     random.shuffle(indices)
 
-    for i in range(0, len(indices), batch_size):
-        batch_indices = indices[i:i+batch_size]
-        # Skip the last batch if it's smaller than the batch size, as TinyJit requires fixed shapes
-        if len(batch_indices) < batch_size:
+    buffer_prompts = []
+    buffer_full_texts = []
+
+    for idx in indices:
+        item = dataset[idx]
+
+        # 1. Extract and convert conversation format from {from, value} to {role, content}
+        conversation = item.get("conversations", [])
+        if not conversation:
             continue
 
-        batch_data = dataset[batch_indices]
+        messages = []
+        for turn in conversation:
+            # Map 'from' to 'role'. Assuming 'human' -> 'user' and 'gpt' -> 'assistant'
+            role = "user" if turn.get("from") == "human" else "assistant"
+            content = turn.get("value", "")
+            messages.append({"role": role, "content": content})
+
+        # 2. We only train on the last assistant response. Ensure the conversation ends with one.
+        if not messages or messages[-1]["role"] != "assistant":
+            continue
+
+        # 3. Create the full text and the prompt text for masking purposes.
+        # The full text is the entire conversation, which becomes the model's input.
+        full_text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False  # The full conversation is provided
+        )
         
-        prompts = []
-        full_texts = []
-        
-        for j in range(batch_size):
-            item = {key: val[j] for key, val in batch_data.items()}
-            
-            prompt_input = item.get("input", "")
-            prompt = PROMPT_TEMPLATE.format(instruction=item["instruction"], input=prompt_input)
-            full_text = prompt + item["output"] + tokenizer.eos_token
-            
-            prompts.append(prompt)
-            full_texts.append(full_text)
-
-        # Batch tokenize the full texts with padding and truncation
-        full_tokenized = tokenizer(
-            full_texts,
-            max_length=max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors=None, # Return Python lists
+        # The "prompt" text is the conversation *up to* the final response, with a
+        # generation prompt added. This tells the model to start generating.
+        # We tokenize this separately to find out how many initial tokens to mask in the labels.
+        prompt_messages = messages[:-1]
+        prompt_text = tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=False,
+            add_generation_prompt=True
         )
 
-        # Batch tokenize prompts to get their lengths for masking
-        prompt_tokenized = tokenizer(
-            prompts,
-            max_length=max_length,
-            truncation=True,
-            return_tensors=None,
-        )
+        buffer_full_texts.append(full_text)
+        buffer_prompts.append(prompt_text)
 
-        input_ids_batch = full_tokenized['input_ids']
-        labels_batch = []
+        # 4. When the buffer is full, process and yield a batch
+        if len(buffer_full_texts) == batch_size:
+            # Batch tokenize the full texts with padding and truncation
+            full_tokenized = tokenizer(
+                buffer_full_texts,
+                max_length=max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors=None,  # Return Python lists
+            )
 
-        # Create labels for each item in the batch
-        for j in range(batch_size):
-            prompt_len = len(prompt_tokenized['input_ids'][j])
-            
-            # Start with a copy of the input_ids
-            labels = list(input_ids_batch[j])
-            
-            # Mask the prompt part
-            labels[:prompt_len] = [IGNORE_INDEX] * prompt_len
-            
-            # Mask padding tokens in the labels
-            for k in range(len(labels)):
-                if input_ids_batch[j][k] == tokenizer.pad_token_id:
-                    labels[k] = IGNORE_INDEX
-            
-            labels_batch.append(labels)
-            
-        # Yield a batch of tinygrad tensors
-        yield (
-            Tensor(input_ids_batch, dtype=dtypes.int32, device=Device.DEFAULT),
-            Tensor(labels_batch, dtype=dtypes.int32, device=Device.DEFAULT)
-        )
+            # Batch tokenize prompts to get their lengths for masking
+            prompt_tokenized = tokenizer(
+                buffer_prompts,
+                max_length=max_length,
+                truncation=True,
+                return_tensors=None,
+            )
+
+            input_ids_batch = full_tokenized['input_ids']
+            labels_batch = []
+
+            # Create labels for each item in the batch
+            for j in range(batch_size):
+                prompt_len = len(prompt_tokenized['input_ids'][j])
+                
+                # Start with a copy of the input_ids
+                labels = list(input_ids_batch[j])
+                
+                # Mask the prompt part so loss is not calculated on it
+                labels[:prompt_len] = [IGNORE_INDEX] * prompt_len
+                
+                # Mask padding tokens in the labels as well
+                for k in range(len(labels)):
+                    if input_ids_batch[j][k] == tokenizer.pad_token_id:
+                        labels[k] = IGNORE_INDEX
+                
+                labels_batch.append(labels)
+                
+            # Yield a batch of tinygrad tensors
+            yield (
+                Tensor(input_ids_batch, dtype=dtypes.int32, device=Device.DEFAULT),
+                Tensor(labels_batch, dtype=dtypes.int32, device=Device.DEFAULT)
+            )
+
+            # Clear buffers for the next batch
+            buffer_prompts = []
+            buffer_full_texts = []
 
 def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) -> int:
     """
@@ -264,13 +287,13 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
-    parser.add_argument("--dataset_id", type=str, default="tatsu-lab/alpaca", help="Hugging Face dataset ID for SFT")
+    parser.add_argument("--dataset_id", type=str, default="mlabonne/FineTome-100k", help="Hugging Face dataset ID for SFT")
     parser.add_argument("--max_length", type=int, default=512, help="Fixed sequence length for training")
     parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Optimizer learning rate")
     parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
-    parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
-    parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
+    parser.add_argument("--max_steps", type=int, default=1, help="Maximum number of training steps")
+    parser.add_argument("--max_samples", type=int, default=2, help="Maximum number of samples to use from the dataset (for quick tests)")
     parser.add_argument("--device_peak_flops", type=float, default=26.43, help="Peak FP16/BF16 TFLOPS of the training device. E.g., A100: 312, RTX 4090: 330, RX 6700XT: ~23. If -1, MFU is not calculated.")
     args = parser.parse_args()
     main(args)
