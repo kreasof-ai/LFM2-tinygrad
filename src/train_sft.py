@@ -14,6 +14,7 @@ import time
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 from datasets import load_dataset
+import wandb # <-- ADDED: Import wandb
 
 # tinygrad imports
 from tinygrad import Tensor, Device, dtypes, TinyJit
@@ -170,6 +171,14 @@ def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) ->
 # --- Training ---
 
 def main(args):
+    # <-- ADDED: Initialize wandb -->
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args)
+        )
+
     print(f"--- Starting SFT Training for {args.model_id} on {Device.DEFAULT} ---")
 
     # 1. Load Model and Tokenizer
@@ -235,9 +244,10 @@ def main(args):
 
         optim.step()
         lr_scheduler.step()
-        loss, out_lr = loss.detach().to("CPU"), optim.lr.to("CPU")
-        Tensor.realize(loss, out_lr)
-        return loss, out_lr.item()
+        # <-- MODIFIED: Return grad norm for logging -->
+        loss, out_lr, grad_norm_cpu = loss.detach().to("CPU"), optim.lr.to("CPU"), total_norm.detach().to("CPU")
+        Tensor.realize(loss, out_lr, grad_norm_cpu)
+        return loss, out_lr.item(), grad_norm_cpu
 
     # 4. Training Loop
     print("\n--- Starting Training ---")
@@ -258,7 +268,8 @@ def main(args):
 
             start_time = time.perf_counter()
             GlobalCounters.reset()
-            loss, lr = train_step(input_ids, labels)
+            # <-- MODIFIED: Get grad norm from train_step -->
+            loss, lr, grad_norm = train_step(input_ids, labels)
             end_time = time.perf_counter()
             
             step_time = end_time - start_time
@@ -267,6 +278,8 @@ def main(args):
 
             # MFU calculation
             mfu_str = "N/A"
+            achieved_tflops = 0.0
+            mfu = 0.0
             if flops_per_step > 0 and len(step_times) > 0:
                 avg_step_time = sum(step_times) / len(step_times)
                 achieved_tflops = flops_per_step / avg_step_time / 1e12
@@ -274,6 +287,7 @@ def main(args):
                 mfu_str = f"{mfu:.2%}"
             
             loss_val = loss.item()
+            grad_norm_val = grad_norm.item()
             pbar.set_postfix({
                 "loss": f"{loss_val:.4f}", 
                 "lr":  f"{lr:.0e}".replace("e-0", "e-"),
@@ -281,7 +295,22 @@ def main(args):
                 "MFU": mfu_str
             })
 
+            # <-- ADDED: Log metrics to wandb -->
+            if args.use_wandb:
+                wandb.log({
+                    "train/loss": loss_val,
+                    "train/learning_rate": lr,
+                    "perf/step_time_ms": step_time * 1000,
+                    "perf/grad_norm": grad_norm_val,
+                    "perf/mfu": mfu,
+                    "perf/achieved_tflops": achieved_tflops,
+                }, step=step)
+
+
     print("\n--- Training Complete ---")
+    # <-- ADDED: Finish the wandb run -->
+    if args.use_wandb:
+        wandb.finish()
     # TODO: Add model saving logic here if desired
 
 if __name__ == "__main__":
@@ -292,8 +321,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Optimizer learning rate")
     parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
-    parser.add_argument("--max_steps", type=int, default=1, help="Maximum number of training steps")
-    parser.add_argument("--max_samples", type=int, default=2, help="Maximum number of samples to use from the dataset (for quick tests)")
-    parser.add_argument("--device_peak_flops", type=float, default=26.43, help="Peak FP16/BF16 TFLOPS of the training device. E.g., A100: 312, RTX 4090: 330, RX 6700XT: ~23. If -1, MFU is not calculated.")
+    parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
+    parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
+    parser.add_argument("--device_peak_flops", type=float, default=-1.0, help="Peak FP16/BF16 TFLOPS of the training device. E.g., A100: 312, RTX 4090: 330, RX 6700XT: ~23. If -1, MFU is not calculated.")
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="lfm2-tinygrad-sft", help="Wandb project name")
+    parser.add_argument("--wandb_run_name", type=str, default=f"sft-run-{int(time.time())}", help="Wandb run name")
+    
     args = parser.parse_args()
     main(args)
