@@ -14,14 +14,14 @@ import time
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 from datasets import load_dataset
-import wandb # <-- ADDED: Import wandb
+import wandb 
 
 # tinygrad imports
 from tinygrad import Tensor, Device, dtypes, TinyJit
 from tinygrad.nn.optim import AdamW
 from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
-from extra.lr_scheduler import CosineAnnealingLR
+from extra.lr_scheduler import OneCycleLR 
 
 # Project imports
 from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
@@ -168,10 +168,7 @@ def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) ->
     return 3 * fwd_flops
 
 
-# --- Training ---
-
 def main(args):
-    # <-- ADDED: Initialize wandb -->
     if args.use_wandb:
         wandb.init(
             project=args.wandb_project,
@@ -194,7 +191,6 @@ def main(args):
     model = LFM2ForCausalLM(config)
     load_from_hf(model, args.model_id)
     
-    # --- MFU Calculation Setup ---
     print("\n--- Model & MFU Setup ---")
     if args.device_peak_flops > 0:
         total_params = sum(p.numel() for p in get_parameters(model))
@@ -207,11 +203,9 @@ def main(args):
         flops_per_step = 0
         print("  Skipping MFU calculation (device_peak_flops not provided).")
 
-    # Set model parameters to require gradients
     for p in get_parameters(model):
         p.requires_grad = True
 
-    # 2. Load and Prepare Dataset
     print(f"\nLoading dataset '{args.dataset_id}'...")
     dataset = load_dataset(args.dataset_id, split="train")
     if args.max_samples is not None:
@@ -222,8 +216,17 @@ def main(args):
         p.requires_grad = True
 
     # 3. Setup Optimizer and JIT'd Training Step
-    optim = AdamW(params, lr=args.learning_rate)
-    lr_scheduler = CosineAnnealingLR(optim, T_max=args.max_steps) 
+    optim = AdamW(params, lr=args.learning_rate) # LR here is just a placeholder, OneCycleLR will manage it
+    
+    # --- MODIFIED: Use OneCycleLR ---
+    lr_scheduler = OneCycleLR(
+        optim,
+        max_lr=args.learning_rate,
+        total_steps=args.max_steps,
+        div_factor=10,          # Initial LR will be max_lr / 10
+        final_div_factor=100,  # Final LR will be initial_lr / 100
+        pct_start=0.1           # 10% of steps are for warmup
+    )
 
     @TinyJit
     def train_step(input_ids: Tensor, labels: Tensor):
@@ -244,18 +247,17 @@ def main(args):
 
         optim.step()
         lr_scheduler.step()
-        # <-- MODIFIED: Return grad norm for logging -->
         loss, out_lr, grad_norm_cpu = loss.detach().to("CPU"), optim.lr.to("CPU"), total_norm.detach().to("CPU")
         Tensor.realize(loss, out_lr, grad_norm_cpu)
         return loss, out_lr.item(), grad_norm_cpu
 
-    # 4. Training Loop
+    # 4. Training Loop (no changes needed here)
     print("\n--- Starting Training ---")
     train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
     pbar = tqdm(range(args.max_steps), desc="Training")
     
     step_times = []
-    warmup_steps = 5 # Ignore first few steps for MFU calc due to JIT compilation
+    warmup_steps = 5 
 
     for step in pbar:
         with Tensor.train():
@@ -268,7 +270,6 @@ def main(args):
 
             start_time = time.perf_counter()
             GlobalCounters.reset()
-            # <-- MODIFIED: Get grad norm from train_step -->
             loss, lr, grad_norm = train_step(input_ids, labels)
             end_time = time.perf_counter()
             
@@ -276,7 +277,6 @@ def main(args):
             if step >= warmup_steps:
                 step_times.append(step_time)
 
-            # MFU calculation
             mfu_str = "N/A"
             achieved_tflops = 0.0
             mfu = 0.0
@@ -295,7 +295,6 @@ def main(args):
                 "MFU": mfu_str
             })
 
-            # <-- ADDED: Log metrics to wandb -->
             if args.use_wandb:
                 wandb.log({
                     "train/loss": loss_val,
@@ -308,10 +307,8 @@ def main(args):
 
 
     print("\n--- Training Complete ---")
-    # <-- ADDED: Finish the wandb run -->
     if args.use_wandb:
         wandb.finish()
-    # TODO: Add model saving logic here if desired
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
