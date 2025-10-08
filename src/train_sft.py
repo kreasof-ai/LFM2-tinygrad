@@ -218,15 +218,15 @@ def main(args):
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(params, lr=args.learning_rate) # LR here is just a placeholder, OneCycleLR will manage it
     
-    # --- MODIFIED: Use OneCycleLR ---
-    lr_scheduler = OneCycleLR(
-        optim,
-        max_lr=args.learning_rate,
-        total_steps=args.max_steps,
-        div_factor=10,          # Initial LR will be max_lr / 10
-        final_div_factor=100,  # Final LR will be initial_lr / 100
-        pct_start=0.1           # 10% of steps are for warmup
-    )
+    # # --- MODIFIED: Use OneCycleLR ---
+    # lr_scheduler = OneCycleLR(
+    #     optim,
+    #     max_lr=args.learning_rate,
+    #     total_steps=args.max_steps,
+    #     div_factor=10,          # Initial LR will be max_lr / 10
+    #     final_div_factor=100,  # Final LR will be initial_lr / 100
+    #     pct_start=0.1           # 10% of steps are for warmup
+    # )
 
     @TinyJit
     def train_step(input_ids: Tensor, labels: Tensor):
@@ -246,7 +246,7 @@ def main(args):
                 p.grad = p.grad * (args.gradient_clipping_norm / (total_norm + 1e-6)).clamp(max_=1.0)
 
         optim.step()
-        lr_scheduler.step()
+        # lr_scheduler.step()
         loss, out_lr, grad_norm_cpu = loss.detach().to("CPU"), optim.lr.to("CPU"), total_norm.detach().to("CPU")
         Tensor.realize(loss, out_lr, grad_norm_cpu)
         return loss, out_lr.item(), grad_norm_cpu
@@ -315,8 +315,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     parser.add_argument("--dataset_id", type=str, default="mlabonne/FineTome-100k", help="Hugging Face dataset ID for SFT")
     parser.add_argument("--max_length", type=int, default=512, help="Fixed sequence length for training")
-    parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Optimizer learning rate")
+    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--learning_rate", type=float, default=1e-6, help="Optimizer learning rate")
     parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
     parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
