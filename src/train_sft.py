@@ -19,18 +19,75 @@ import wandb
 # tinygrad imports
 from tinygrad import Tensor, Device, dtypes, TinyJit
 from tinygrad.nn.optim import AdamW
+from tinygrad.nn import Linear
 from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
 from extra.lr_scheduler import OneCycleLR 
 
 # Project imports
 from model.fp16_lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf
-from model.lfm2_modeling import GroupedQueryAttention, LFM2ConvOperator, SwiGLU
+from model.fp16_lfm2_modeling import GroupedQueryAttention, LFM2ConvOperator, SwiGLU
+
+class LoRALinear:
+    """
+    Wraps a tinygrad Linear layer with LoRA functionality.
+    The original weights are frozen, and two new low-rank matrices (A and B)
+    are made trainable.
+    """
+    def __init__(self, linear_layer: Linear, r: int, lora_alpha: int):
+        # The original linear layer is passed, and its weights are frozen.
+        self.linear = linear_layer
+        self.linear.weight.requires_grad = False
+
+        out_features, in_features = self.linear.weight.shape
+
+        # Initialize LoRA matrices
+        # Kaiming uniform for A, zeros for B is a standard LoRA initialization
+        self.lora_A = Tensor.kaiming_uniform(in_features, r, requires_grad=True)
+        self.lora_B = Tensor.zeros(r, out_features, requires_grad=True)
+        
+        self.scaling = lora_alpha / r
+
+    def __call__(self, x: Tensor) -> Tensor:
+        # Forward pass: original output + scaled LoRA output
+        original_out = self.linear(x)
+        lora_out = (x @ self.lora_A @ self.lora_B) * self.scaling
+        return original_out + lora_out
+
+def apply_lora_to_model(model: LFM2ForCausalLM, r: int, alpha: int, target_modules: List[str]):
+    """
+    Recursively traverses the model and replaces target Linear layers with LoRALinear layers.
+    """
+    print(f"Applying LoRA with r={r}, alpha={alpha} to modules: {target_modules}")
+    lora_param_count = 0
+    total_param_count = sum(p.numel() for p in get_parameters(model))
+
+    # Target modules are typically in the attention blocks
+    for layer in model.model.layers:
+        if isinstance(layer.operator, GroupedQueryAttention):
+            for module_name in target_modules:
+                if hasattr(layer.operator, module_name):
+                    original_linear = getattr(layer.operator, module_name)
+                    if isinstance(original_linear, Linear):
+                        lora_linear = LoRALinear(original_linear, r, alpha)
+                        setattr(layer.operator, module_name, lora_linear)
+                        # Add the new trainable parameters to the count
+                        lora_param_count += lora_linear.lora_A.numel() + lora_linear.lora_B.numel()
+
+    print(f"Total model parameters: {total_param_count / 1e6:.2f}M")
+    print(f"Added {lora_param_count / 1e6:.2f}M trainable LoRA parameters.")
+
+def get_lora_parameters(model: LFM2ForCausalLM) -> List[Tensor]:
+    """
+    Returns a list of all trainable parameters in the model, which after applying
+    LoRA, should only be the lora_A and lora_B matrices.
+    """
+    return [p for p in get_parameters(model) if p.requires_grad]
 
 # --- Dataset and Preprocessing ---
 
 IGNORE_INDEX = -100
-
+ 
 def data_generator(dataset, tokenizer, max_length, batch_size):
     """
     A custom data generator that processes, tokenizes, and batches conversational data,
@@ -203,22 +260,33 @@ def main(args):
         flops_per_step = 0
         print("  Skipping MFU calculation (device_peak_flops not provided).")
 
-    for p in get_parameters(model):
-        p.requires_grad = True
+    if args.use_lora:
+        print("\n--- LoRA is enabled ---")
+        # 1. Freeze all original parameters in the model
+        for p in get_parameters(model):
+            p.requires_grad = False
+        
+        # 2. Apply LoRA wrappers, which creates new trainable parameters
+        apply_lora_to_model(model, args.lora_r, args.lora_alpha, args.lora_target_modules)
+        
+        # 3. Get only the LoRA parameters for the optimizer
+        params = get_lora_parameters(model)
+        print(f"Optimizing {len(params)} LoRA tensors.")
+    else:
+        print("\n--- Full finetuning enabled ---")
+        params = get_parameters(model)
+        for p in params:
+            p.requires_grad = True
 
     print(f"\nLoading dataset '{args.dataset_id}'...")
     dataset = load_dataset(args.dataset_id, split="train")
     if args.max_samples is not None:
         dataset = dataset.select(range(args.max_samples))
 
-    params = get_parameters(model)
-    for p in params:
-        p.requires_grad = True
-
     # 3. Setup Optimizer and JIT'd Training Step
     optim = AdamW(params, lr=args.learning_rate) # LR here is just a placeholder, OneCycleLR will manage it
     
-    # # --- MODIFIED: Use OneCycleLR ---
+    # Use OneCycleLR ---
     # lr_scheduler = OneCycleLR(
     #     optim,
     #     max_lr=args.learning_rate,
@@ -251,7 +319,7 @@ def main(args):
         Tensor.realize(loss, out_lr, grad_norm_cpu)
         return loss, out_lr.item(), grad_norm_cpu
 
-    # 4. Training Loop (no changes needed here)
+    # 4. Training Loop
     print("\n--- Starting Training ---")
     train_iterator = iter(data_generator(dataset, tokenizer, args.max_length, args.batch_size))
     pbar = tqdm(range(args.max_steps), desc="Training")
@@ -312,18 +380,30 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
+    # General arguments
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     parser.add_argument("--dataset_id", type=str, default="mlabonne/FineTome-100k", help="Hugging Face dataset ID for SFT")
     parser.add_argument("--max_length", type=int, default=512, help="Fixed sequence length for training")
-    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-6, help="Optimizer learning rate")
+    parser.add_argument("--batch_size", type=int, default=8, help="Training batch size")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Optimizer learning rate (max_lr for LoRA)")
     parser.add_argument("--gradient_clipping_norm", type=float, default=1.0, help="Optimizer gradient clipping norm")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum number of training steps")
     parser.add_argument("--max_samples", type=int, default=1000, help="Maximum number of samples to use from the dataset (for quick tests)")
-    parser.add_argument("--device_peak_flops", type=float, default=-1.0, help="Peak FP16/BF16 TFLOPS of the training device. E.g., A100: 312, RTX 4090: 330, RX 6700XT: ~23. If -1, MFU is not calculated.")
+    
+    # LoRA arguments
+    parser.add_argument("--use_lora", action="store_true", help="Enable LoRA fine-tuning")
+    parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha (scaling factor)")
+    parser.add_argument("--lora_target_modules", nargs='+', default=["q_proj", "k_proj", "v_proj"], help="List of module names to apply LoRA to (e.g., q_proj v_proj)")
+
+    # Performance and Logging arguments
+    parser.add_argument("--device_peak_flops", type=float, default=-1.0, help="Peak FP16/BF16 TFLOPS of the training device. If -1, MFU is not calculated.")
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="lfm2-tinygrad-sft", help="Wandb project name")
     parser.add_argument("--wandb_run_name", type=str, default=f"sft-run-{int(time.time())}", help="Wandb run name")
     
     args = parser.parse_args()
+    # A higher learning rate is generally used for LoRA
+    if args.use_lora and args.learning_rate == 1e-6:
+        print("Warning: Using default low learning rate with LoRA. Consider a higher LR like 1e-4.")
     main(args)
