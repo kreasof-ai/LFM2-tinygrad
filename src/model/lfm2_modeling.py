@@ -15,7 +15,7 @@ The behavior is controlled by flags in the LFM2Config class.
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Type, Union
 
 # Third-party imports
 from huggingface_hub import hf_hub_download
@@ -24,12 +24,14 @@ import torch # only used for converting weights
 from transformers import AutoTokenizer
 
 # tinygrad imports
-from tinygrad import Tensor, dtypes, GlobalCounters
+from tinygrad import Tensor, dtypes, GlobalCounters, Device
 from tinygrad.helpers import getenv
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
+from tinygrad.nn.state import load_state_dict
 
 # Project imports for Paged Attention
 from experimental.paged_attention import PagedKVCache, PageTable
+from extra.quantization import NF4Linear
 
 # --- HF-like Model Output ---
 
@@ -66,6 +68,9 @@ class LFM2Config:
     # --- FUSION FLAGS ---
     use_paged_attention: bool = False
     dtype: Any = dtypes.float32
+
+    # --- Quantization ---
+    quantize: Optional[str] = None
 
     # --- Paged Attention specific fields ---
     page_size: int = 16
@@ -109,10 +114,10 @@ def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * s
 
 class LFM2ConvOperator:
     """ The convolution operator part of a conv block, with caching. """
-    def __init__(self, config: LFM2Config):
+    def __init__(self, config: LFM2Config, linear_class: Type = Linear):
         self.hidden_size = config.hidden_size
         self.kernel_size = config.conv_kernel_size
-        self.in_proj = Linear(config.hidden_size, 3 * config.hidden_size, bias=False)
+        self.in_proj = linear_class(config.hidden_size, 3 * config.hidden_size, bias=False)
         self.conv = Conv1d(
             in_channels=config.hidden_size,
             out_channels=config.hidden_size,
@@ -121,8 +126,8 @@ class LFM2ConvOperator:
             groups=config.hidden_size,
             bias=False
         )
-        self.out_proj = Linear(config.hidden_size, config.hidden_size, bias=False)
-
+        self.out_proj = linear_class(config.hidden_size, config.hidden_size, bias=False)
+        
     def __call__(self, x: Tensor, past_conv_state: Optional[Tensor]) -> Tuple[Tensor, Tensor]:
         bsz, seq_len, _ = x.shape
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
@@ -151,7 +156,7 @@ class LFM2ConvOperator:
 
 class GroupedQueryAttention:
     """ Attention with QK Norm, supporting both standard and paged KV caching. """
-    def __init__(self, config: LFM2Config):
+    def __init__(self, config: LFM2Config, linear_class: Type = Linear):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -159,10 +164,10 @@ class GroupedQueryAttention:
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
-        self.q_proj = Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-        self.v_proj = Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-        self.out_proj = Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.q_proj = linear_class(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.out_proj = linear_class(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
         self.q_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -205,21 +210,21 @@ class GroupedQueryAttention:
         return self.out_proj(attn_output), present_kv
 
 class SwiGLU:
-    def __init__(self, hidden_size: int, intermediate_size: int):
-        self.w1 = Linear(hidden_size, intermediate_size, bias=False)
-        self.w3 = Linear(hidden_size, intermediate_size, bias=False)
-        self.w2 = Linear(intermediate_size, hidden_size, bias=False)
+    def __init__(self, hidden_size: int, intermediate_size: int, linear_class: Type = Linear):
+        self.w1 = linear_class(hidden_size, intermediate_size, bias=False)
+        self.w3 = linear_class(hidden_size, intermediate_size, bias=False)
+        self.w2 = linear_class(intermediate_size, hidden_size, bias=False)
     def __call__(self, x: Tensor) -> Tensor:
         return self.w2(self.w1(x).silu() * self.w3(x))
 
 class LFM2DecoderLayer:
-    def __init__(self, config: LFM2Config, is_attention_block: bool):
+    def __init__(self, config: LFM2Config, is_attention_block: bool, linear_class: Type = Linear):
         self.config = config
-        self.feed_forward = SwiGLU(config.hidden_size, config.intermediate_size)
+        self.feed_forward = SwiGLU(config.hidden_size, config.intermediate_size, linear_class)
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.is_attention_block = is_attention_block
-        self.operator = GroupedQueryAttention(config) if is_attention_block else LFM2ConvOperator(config)
+        self.operator = GroupedQueryAttention(config, linear_class) if is_attention_block else LFM2ConvOperator(config, linear_class)
 
     def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor], seq_lens: Optional[List[int]]):
         residual = hidden_states
@@ -235,10 +240,10 @@ class LFM2DecoderLayer:
         return hidden_states, new_state
 
 class LFM2Model:
-    def __init__(self, config: LFM2Config):
+    def __init__(self, config: LFM2Config, linear_class: Type = Linear):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.layers = [LFM2DecoderLayer(config, i in config.full_attn_idxs) for i in range(config.num_hidden_layers)]
+        self.layers = [LFM2DecoderLayer(config, i in config.full_attn_idxs, linear_class) for i in range(config.num_hidden_layers)]
         
         head_dim = config.hidden_size // config.num_attention_heads
         cos_cache, sin_cache = _precompute_rope_cache(dim=head_dim, max_seq_len=config.max_position_embeddings, base=config.rope_theta, dtype=config.dtype)
@@ -274,8 +279,16 @@ class LFM2Model:
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
         self.config = config
-        self.model = LFM2Model(config)
+        
+        if config.quantize == "nf4":
+            self.linear_class = NF4Linear() # Use default block_size=64
+        else:
+            self.linear_class = Linear
+
+        self.model = LFM2Model(config, self.linear_class)
+        # lm_head is typically not quantized
         self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
+
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
@@ -328,10 +341,15 @@ def _set_tensor(model: Any, key: str, tensor: Tensor):
     setattr(target, attrs[-1], tensor)
 
 def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.safetensors"):
+    """
+    Loads weights from a Hugging Face safetensors file into the tinygrad model.
+    Handles on-the-fly quantization if configured.
+    """
     print(f"Fetching weights from {repo_id}/{filename}...")
     local_path = hf_hub_download(repo_id=repo_id, filename=filename)
     dtype = model.config.dtype
 
+    # Define mapping from Hugging Face weight names to our tinygrad model's attribute names
     key_map = {
         "model.embedding_norm.weight": "model.norm.weight",
         "model.embed_tokens.weight": "model.embed_tokens.weight"
@@ -361,17 +379,35 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
                 f"{p}.conv.out_proj.weight": f"{p}.operator.out_proj.weight"
             })
 
-    print("Loading and assigning weights...")
-    GlobalCounters.reset()
+    # 1. Load all weights into a temporary dictionary with tinygrad names
+    tg_state_dict = {}
+    print("Loading weights into memory...")
     with safe_open(local_path, framework="pt", device="cpu") as f:
         for hf_key, tg_key in key_map.items():
             if hf_key not in f.keys():
                 print(f"Warning: Weight key not found in safetensors file: {hf_key}")
                 continue
             pt_tensor = f.get_tensor(hf_key)
+            # Load as float32 first for quantization stability
             np_array = pt_tensor.to(torch.float32).numpy()
-            _set_tensor(model, tg_key, Tensor(np_array, requires_grad=False, dtype=dtype))
-    
+            tg_state_dict[tg_key] = Tensor(np_array, requires_grad=False)
+
+    # 2. If quantization is enabled, transform the state dictionary
+    if model.config.quantize == "nf4":
+        assert hasattr(model, 'linear_class') and hasattr(model.linear_class, 'quantize'), \
+            "Model must be initialized with a quantizable linear class."
+        device = getattr(model.model.embed_tokens.weight, 'device', Device.DEFAULT)
+        tg_state_dict = model.linear_class.quantize(tg_state_dict, device=device)
+
+    # 3. Cast non-quantized weights to the model's target dtype
+    for k in tg_state_dict:
+        if tg_state_dict[k].dtype != dtypes.uint8: # Don't change quantized weights
+            tg_state_dict[k] = tg_state_dict[k].cast(dtype)
+
+    # 4. Load the final state dictionary into the model
+    print("Assigning weights to model...")
+    load_state_dict(model, tg_state_dict, strict=False)
+
     if model.config.tie_word_embeddings:
         print("Re-tying word embeddings for lm_head...")
         model.lm_head.weight = model.model.embed_tokens.weight

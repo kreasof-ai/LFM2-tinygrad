@@ -96,6 +96,11 @@ def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) ->
 
 
 def main(args):
+    if args.quantize:
+        raise NotImplementedError(
+            "Quantization is not supported for training. "
+            "Please run SFT without the --quantize flag."
+        )
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
 
@@ -228,6 +233,8 @@ if __name__ == "__main__":
     # Configuration Toggles
     parser.add_argument("--use_fp16", action="store_true", help="Enable FP16 training for lower memory usage")
     parser.add_argument("--use_paged_attention", action="store_true", help="Enable Paged Attention (Note: not recommended for fixed-shape SFT)")
+    # Add quantization argument to prevent errors, but it will be caught in main()
+    parser.add_argument("--quantize", type=str, default=None, help="Quantization mode (not supported for SFT).")
     # Performance and Logging
     parser.add_argument("--device_peak_flops", type=float, default=-1.0, help="Peak FP16/BF16 TFLOPS of device. -1 to disable MFU calculation.")
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")

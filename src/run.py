@@ -1,11 +1,12 @@
 import json
+import argparse
 # Third-party imports
 from huggingface_hub import hf_hub_download
 from model.lfm2_modeling import LFM2Config, LFM2ForCausalLM, generate, load_from_hf
 from transformers import AutoTokenizer
 
 # tinygrad imports
-from tinygrad import Tensor
+from tinygrad import Tensor, dtypes
 from tinygrad.helpers import getenv
 from tinygrad import Device
 
@@ -16,6 +17,10 @@ if getenv("SEED"):
     Tensor.manual_seed(getenv("SEED"))
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run LFM2 inference in tinygrad.")
+    parser.add_argument("--quantize", type=str, default=None, choices=["nf4"], help="Enable NF4 quantization for the model.")
+    args = parser.parse_args()
+
     REPO_ID = "LiquidAI/LFM2-350M"
     print(f"--- Loading LFM2 Model: {REPO_ID} ---")
 
@@ -25,6 +30,15 @@ if __name__ == "__main__":
         config_dict = json.load(f)
 
     config = LFM2Config.from_hf_config(config_dict)
+
+    # --- Apply quantization if requested ---
+    if args.quantize:
+        print(f"\n--- Enabling {args.quantize.upper()} quantization ---")
+        config.quantize = args.quantize
+        # NF4 uses float16 for scales, so it's best to set the base model dtype
+        # to float16 to avoid excessive casting.
+        config.dtype = dtypes.float16
+
     print("\nModel configuration:")
 
     for i in range(config.num_hidden_layers):
