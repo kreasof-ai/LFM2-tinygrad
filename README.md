@@ -1,6 +1,6 @@
 # LFM2 (Liquid Foundation Model 2) in tinygrad
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-apache-2.0-blue.svg)](https://opensource.org/license/apache-2-0)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/apache-2-0)
 
 This repository contains a from-scratch implementation of the **[LFM2 (Liquid Foundation Model 2)](https://www.liquid.ai/blog/liquid-foundation-models-v2-our-second-series-of-generative-ai-models)** architecture using **[tinygrad](https://github.com/tinygrad/tinygrad)**, the minimalist deep learning framework. The project focuses on educational value, numerical correctness against official implementations, and exploring advanced features like paged attention and LoRA for supervised fine-tuning.
 
