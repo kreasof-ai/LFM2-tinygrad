@@ -82,13 +82,6 @@ The secret to a long and happy life is often attributed to a combination of seve
 --- Generation Complete ---
 ```
 
-#### Inference with Paged Attention
-To use the experimental paged attention implementation, run `run_paged.py`.
-
-```bash
-python src/run_paged.py
-```
-
 #### Supervised Fine-Tuning (SFT) with LoRA
 The `train_sft.py` script allows you to fine-tune the model on any conversational dataset from the Hugging Face Hub. LoRA is enabled by default for efficiency.
 
