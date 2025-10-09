@@ -3,6 +3,10 @@
 import os
 os.environ["VIZ"] = "0" # Set this to 1 if you want to see performance profiler after training
 
+if False: # Set true to enable Vulkan backend via WebGPU
+    os.environ["WEBGPU"] = "1"
+    os.environ["WEBGPU_BACKEND"] = "WGPUBackendType_Vulkan"
+
 import json
 import argparse
 from typing import List
