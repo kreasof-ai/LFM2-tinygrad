@@ -3,10 +3,12 @@
 """
 LFM2 (Liquid Foundation Model 2) tinygrad Implementation
 
-This version is adapted to load pretrained weights from Hugging Face Hub.
-It includes fixes for stateful convolution caching during generation and uses Conv1d.
+This is a unified implementation supporting:
+1. Standard float32 inference.
+2. Experimental Paged Attention for efficient KV cache management.
+3. float16 precision for training and inference.
 
-Heavily inspired from https://github.com/kyegomez/LFM2 and official https://github.com/huggingface/transformers/blob/main/src/transformers/models/lfm2/modeling_lfm2.py implementation
+The behavior is controlled by flags in the LFM2Config class.
 """
 
 
@@ -19,13 +21,15 @@ from typing import Any, List, Optional, Tuple, Union
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 import torch # only used for converting weights
-from tqdm import trange
 from transformers import AutoTokenizer
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes, GlobalCounters
 from tinygrad.helpers import getenv
 from tinygrad.nn import Conv1d, Embedding, Linear, RMSNorm
+
+# Project imports for Paged Attention
+from experimental.paged_attention import PagedKVCache, PageTable
 
 # --- HF-like Model Output ---
 
@@ -44,7 +48,7 @@ class CausalLMOutputWithPast:
 
 @dataclass
 class LFM2Config:
-    """Configuration class for LFM2, adapted for Hugging Face models."""
+    """Unified configuration class for LFM2."""
     vocab_size: int = 65536
     hidden_size: int = 1024
     intermediate_size: int = 6656
@@ -58,8 +62,15 @@ class LFM2Config:
     rope_theta: float = 1000000.0
     tie_word_embeddings: bool = True
     initializer_range: float = 0.02
-    attention_dropout: float = 0.0
-    hidden_dropout: float = 0.0
+
+    # --- FUSION FLAGS ---
+    use_paged_attention: bool = False
+    dtype: Any = dtypes.float32
+
+    # --- Paged Attention specific fields ---
+    page_size: int = 16
+    max_batch_size: int = 8
+    num_pages: int = 2048
 
     @classmethod
     def from_hf_config(cls, config_dict: dict) -> "LFM2Config":
@@ -85,20 +96,19 @@ class LFM2Config:
             rope_theta=config_dict["rope_theta"],
         )
 
-def _precompute_rope_cache(dim: int, max_seq_len: int, base: float) -> Tuple[Tensor, Tensor]:
+def _precompute_rope_cache(dim: int, max_seq_len: int, base: float, dtype) -> Tuple[Tensor, Tensor]:
     """Pre-computes the rotary positional embeddings for the given dimensions."""
-    inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtypes.float32) / dim))
+    inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtype) / dim))
     t = Tensor.arange(max_seq_len, dtype=inv_freq.dtype)
     freqs = t.reshape(-1, 1) * inv_freq.reshape(1, -1)
     emb = Tensor.cat(freqs, freqs, dim=-1)
-    # Return as two separate tensors for cos and sin
     return emb.cos().contiguous(), emb.sin().contiguous()
 
 def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
 def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
 class LFM2ConvOperator:
-    """ The actual convolution operator part of a conv block, now with caching. """
+    """ The convolution operator part of a conv block, with caching. """
     def __init__(self, config: LFM2Config):
         self.hidden_size = config.hidden_size
         self.kernel_size = config.conv_kernel_size
@@ -131,15 +141,8 @@ class LFM2ConvOperator:
         else: # Generation stage (seq_len == 1)
             assert past_conv_state is not None
             assert past_conv_state.shape[2] == self.kernel_size
-
-            # Create the new state buffer by rolling: drop the oldest, append the newest.
             new_conv_state = Tensor.cat(past_conv_state[:, :, 1:], x_gated_permuted, dim=2)
-
-            # Perform manual 1D convolution for the single step
-            # Instead of calling self.conv() again, we do the dot product directly.
-            # self.conv.weight shape: (hidden_size, 1, kernel_size) -> reshape for broadcasting
             conv_weights = self.conv.weight.reshape(1, self.hidden_size, self.kernel_size)
-            # Element-wise product and sum over the kernel dimension.
             conv_out = (new_conv_state * conv_weights).sum(axis=2, keepdim=True)
 
         conv_out = conv_out.permute(0, 2, 1)
@@ -147,8 +150,9 @@ class LFM2ConvOperator:
         return output, new_conv_state
 
 class GroupedQueryAttention:
-    """ Attention with QK Norm """
+    """ Attention with QK Norm, supporting both standard and paged KV caching. """
     def __init__(self, config: LFM2Config):
+        self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
@@ -163,38 +167,42 @@ class GroupedQueryAttention:
         self.q_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_key_value: Optional[Tuple[Tensor, Tensor]], cos_sin: Tuple[Tensor, Tensor]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor], seq_lens: Optional[List[int]]):
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
-        value_states = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).permute(0, 2, 1, 3)
+        value_states = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
 
         query_states = self.q_layernorm(query_states).permute(0, 2, 1, 3)
         key_states = self.k_layernorm(key_states).permute(0, 2, 1, 3)
+        value_states = value_states.permute(0, 2, 1, 3)
 
         cos, sin = cos_sin
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if past_key_value is not None:
-            key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
-            value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
-        present_key_value = (key_states, value_states)
+        if self.config.use_paged_attention:
+            paged_kv_cache = past_kv
+            input_pos = Tensor.arange(start_pos, start_pos + q_len).reshape(1, q_len).expand(bsz, q_len)
+            paged_kv_cache.update(batch_idx, input_pos, key_states.permute(0, 2, 1, 3), value_states.permute(0, 2, 1, 3))
+            
+            all_key_states, all_value_states = paged_kv_cache.gather_kv_for_attention(batch_idx, seq_lens)
+            all_key_states = all_key_states.permute(0, 2, 1, 3)
+            all_value_states = all_value_states.permute(0, 2, 1, 3)
+            present_kv = paged_kv_cache
+        else:
+            past_key_value = past_kv
+            if past_key_value is not None:
+                key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
+                value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
+            all_key_states, all_value_states = key_states, value_states
+            present_kv = (key_states, value_states)
 
-        key_states = key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
-        value_states = value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
+        all_key_states = all_key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
+        all_value_states = all_value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
         
-        # *** OPTIMIZATION: Replaced manual attention with tinygrad's fused SDPA kernel ***
-        # The original implementation was:
-        # attn_weights = (query_states @ key_states.permute(0, 1, 3, 2)) / math.sqrt(self.head_dim)
-        # if attention_mask is not None: attn_weights += attention_mask
-        # attn_weights = attn_weights.softmax(-1).cast(query_states.dtype)
-        # attn_output = (attn_weights @ value_states)
-
-        # The new implementation uses a single, highly optimized function.
-        attn_output = Tensor.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask)
-
+        attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
         attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
-        return self.out_proj(attn_output), present_key_value
+        return self.out_proj(attn_output), present_kv
 
 class SwiGLU:
     def __init__(self, hidden_size: int, intermediate_size: int):
@@ -205,30 +213,25 @@ class SwiGLU:
         return self.w2(self.w1(x).silu() * self.w3(x))
 
 class LFM2DecoderLayer:
-    """ The new unified decoder layer for both Conv and Attention """
     def __init__(self, config: LFM2Config, is_attention_block: bool):
+        self.config = config
         self.feed_forward = SwiGLU(config.hidden_size, config.intermediate_size)
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.is_attention_block = is_attention_block
+        self.operator = GroupedQueryAttention(config) if is_attention_block else LFM2ConvOperator(config)
 
-        if is_attention_block:
-            self.operator = GroupedQueryAttention(config)
-        else:
-            self.operator = LFM2ConvOperator(config)
-
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor], seq_lens: Optional[List[int]]):
         residual = hidden_states
-
+        normed_hidden = self.operator_norm(hidden_states)
+        
         if self.is_attention_block:
-            hidden_states, new_state = self.operator(self.operator_norm(hidden_states), attention_mask, past_state, cos_sin)
+            hidden_states, new_state = self.operator(normed_hidden, attention_mask, past_state, cos_sin, start_pos, batch_idx, seq_lens)
         else:
-            # past_state is the conv cache tensor for this layer
-            hidden_states, new_state = self.operator(self.operator_norm(hidden_states), past_state)
+            hidden_states, new_state = self.operator(normed_hidden, past_state)
 
         hidden_states = hidden_states + residual
         hidden_states = hidden_states + self.feed_forward(self.ffn_norm(hidden_states))
-
         return hidden_states, new_state
 
 class LFM2Model:
@@ -237,44 +240,29 @@ class LFM2Model:
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layers = [LFM2DecoderLayer(config, i in config.full_attn_idxs) for i in range(config.num_hidden_layers)]
         
-        # Pre-compute RoPE cache
         head_dim = config.hidden_size // config.num_attention_heads
-        cos_cache, sin_cache = _precompute_rope_cache(
-            dim=head_dim,
-            max_seq_len=config.max_position_embeddings,
-            base=config.rope_theta
-        )
+        cos_cache, sin_cache = _precompute_rope_cache(dim=head_dim, max_seq_len=config.max_position_embeddings, base=config.rope_theta, dtype=config.dtype)
         self.cos_cache = cos_cache
         self.sin_cache = sin_cache
 
-
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int = 0, output_hidden_states: bool = False):
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int, output_hidden_states: bool, batch_idx: Optional[Tensor], seq_lens: Optional[List[int]]):
         h = self.embed_tokens(input_ids)
         bsz, seq_len, _ = h.shape
-
         all_hidden_states = (h,) if output_hidden_states else None
-
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
         
-        # --- FIX START ---
-        # Slice the pre-computed RoPE cache and reshape for broadcasting
-        # The target shape is (bsz, 1, seq_len, head_dim) which allows it to
-        # broadcast correctly with query/key tensors of shape (bsz, num_heads, seq_len, head_dim)
         head_dim = self.cos_cache.shape[-1]
         cos = self.cos_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
         sin = self.sin_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, head_dim).expand(bsz, 1, seq_len, head_dim)
-        # --- FIX END ---
         
         new_states_list = []
         current_h = h
         
         for i, layer in enumerate(self.layers):
             past_st = past_states[i] if past_states else None
-            current_h, new_st = layer(current_h, mask, past_st, (cos, sin))
+            current_h, new_st = layer(current_h, mask, past_st, (cos, sin), start_pos, batch_idx, seq_lens)
             new_states_list.append(new_st)
             
-            # Apply the final norm INSIDE the final layer iteration
-            # This replicates the exact structure from debug_prefilling.py that works.
             if i + 1 == len(self.layers):
                 current_h = self.norm(current_h)
             
@@ -291,72 +279,86 @@ class LFM2ForCausalLM:
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, output_hidden_states: bool = False, labels: Optional[Tensor] = None) -> CausalLMOutputWithPast:
-        hidden_states, new_states, all_hidden_states = self.model(
-            input_ids,
-            past_states,
-            start_pos,
-            output_hidden_states=output_hidden_states
-        )
+        if config.use_paged_attention:
+            self.page_table = PageTable(n_pages=config.num_pages, page_size=config.page_size, max_batch_size=config.max_batch_size)
+            self.layer_caches = [None] * config.num_hidden_layers
+            head_dim = config.hidden_size // config.num_attention_heads
+            for i in range(config.num_hidden_layers):
+                if i in config.full_attn_idxs:
+                    self.layer_caches[i] = PagedKVCache(page_table=self.page_table, num_heads=config.num_key_value_heads, head_dim=head_dim, dtype=config.dtype)
+
+    def reset_request_state(self):
+        """Resets convolution caches for a new paged generation request."""
+        assert self.config.use_paged_attention, "This method is for paged attention only."
+        for i in range(self.config.num_hidden_layers):
+            if i not in self.config.full_attn_idxs:
+                self.layer_caches[i] = None
+
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, labels: Optional[Tensor] = None, output_hidden_states: bool = False, batch_idx: Optional[Tensor] = None, seq_lens: Optional[List[int]] = None) -> CausalLMOutputWithPast:
+        if self.config.use_paged_attention:
+            assert batch_idx is not None and seq_lens is not None, "Paged attention requires batch_idx and seq_lens"
+            _past_states = self.layer_caches
+        else:
+            _past_states = past_states
+
+        hidden_states, new_states, all_hidden_states = self.model(input_ids, _past_states, start_pos, output_hidden_states, batch_idx, seq_lens)
+        
+        if self.config.use_paged_attention:
+            for i, state in enumerate(new_states):
+                if i not in self.config.full_attn_idxs: self.layer_caches[i] = state
+        
         logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :]
-            shift_labels = labels[..., 1:]
-            # Flatten the tokens
-            loss = shift_logits.flatten(0, 1).sparse_categorical_crossentropy(shift_labels.flatten(), ignore_index=-100)
-
+            loss = logits[..., :-1, :].flatten(0, 1).sparse_categorical_crossentropy(labels[..., 1:].flatten(), ignore_index=-100)
 
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=new_states,
+            past_key_values=new_states if not self.config.use_paged_attention else self.layer_caches,
             hidden_states=all_hidden_states
         )
 
 def _set_tensor(model: Any, key: str, tensor: Tensor):
     attrs = key.split('.')
-    for i, attr in enumerate(attrs[:-1]):
-        if isinstance(model, list): model = model[int(attr)]
-        else: model = getattr(model, attr)
-    final_attr = attrs[-1]
-    if isinstance(model, list): model[int(final_attr)] = tensor
-    else: setattr(model, final_attr, tensor)
+    target = model
+    for attr in attrs[:-1]:
+        target = getattr(target, attr) if not attr.isdigit() else target[int(attr)]
+    setattr(target, attrs[-1], tensor)
 
 def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.safetensors"):
     print(f"Fetching weights from {repo_id}/{filename}...")
     local_path = hf_hub_download(repo_id=repo_id, filename=filename)
+    dtype = model.config.dtype
 
     key_map = {
         "model.embedding_norm.weight": "model.norm.weight",
-        "model.embed_tokens.weight": "model.embed_tokens.weight",
+        "model.embed_tokens.weight": "model.embed_tokens.weight"
     }
     for i, layer in enumerate(model.model.layers):
-        prefix_hf = f"model.layers.{i}"
-        prefix_tg = f"model.layers.{i}"
+        p = f"model.layers.{i}"
         key_map.update({
-            f"{prefix_hf}.operator_norm.weight": f"{prefix_tg}.operator_norm.weight",
-            f"{prefix_hf}.ffn_norm.weight": f"{prefix_tg}.ffn_norm.weight",
-            f"{prefix_hf}.feed_forward.w1.weight": f"{prefix_tg}.feed_forward.w1.weight",
-            f"{prefix_hf}.feed_forward.w2.weight": f"{prefix_tg}.feed_forward.w2.weight",
-            f"{prefix_hf}.feed_forward.w3.weight": f"{prefix_tg}.feed_forward.w3.weight",
+            f"{p}.operator_norm.weight": f"{p}.operator_norm.weight",
+            f"{p}.ffn_norm.weight": f"{p}.ffn_norm.weight",
+            f"{p}.feed_forward.w1.weight": f"{p}.feed_forward.w1.weight",
+            f"{p}.feed_forward.w2.weight": f"{p}.feed_forward.w2.weight",
+            f"{p}.feed_forward.w3.weight": f"{p}.feed_forward.w3.weight"
         })
         if isinstance(layer.operator, GroupedQueryAttention):
             key_map.update({
-                f"{prefix_hf}.self_attn.q_proj.weight": f"{prefix_tg}.operator.q_proj.weight",
-                f"{prefix_hf}.self_attn.k_proj.weight": f"{prefix_tg}.operator.k_proj.weight",
-                f"{prefix_hf}.self_attn.v_proj.weight": f"{prefix_tg}.operator.v_proj.weight",
-                f"{prefix_hf}.self_attn.out_proj.weight": f"{prefix_tg}.operator.out_proj.weight",
-                f"{prefix_hf}.self_attn.q_layernorm.weight": f"{prefix_tg}.operator.q_layernorm.weight",
-                f"{prefix_hf}.self_attn.k_layernorm.weight": f"{prefix_tg}.operator.k_layernorm.weight",
+                f"{p}.self_attn.q_proj.weight": f"{p}.operator.q_proj.weight",
+                f"{p}.self_attn.k_proj.weight": f"{p}.operator.k_proj.weight",
+                f"{p}.self_attn.v_proj.weight": f"{p}.operator.v_proj.weight",
+                f"{p}.self_attn.out_proj.weight": f"{p}.operator.out_proj.weight",
+                f"{p}.self_attn.q_layernorm.weight": f"{p}.operator.q_layernorm.weight", 
+                f"{p}.self_attn.k_layernorm.weight": f"{p}.operator.k_layernorm.weight"
             })
         elif isinstance(layer.operator, LFM2ConvOperator):
             key_map.update({
-                f"{prefix_hf}.conv.in_proj.weight": f"{prefix_tg}.operator.in_proj.weight",
-                f"{prefix_hf}.conv.conv.weight": f"{prefix_tg}.operator.conv.weight",
-                f"{prefix_hf}.conv.out_proj.weight": f"{prefix_tg}.operator.out_proj.weight",
+                f"{p}.conv.in_proj.weight": f"{p}.operator.in_proj.weight",
+                f"{p}.conv.conv.weight": f"{p}.operator.conv.weight",
+                f"{p}.conv.out_proj.weight": f"{p}.operator.out_proj.weight"
             })
 
     print("Loading and assigning weights...")
@@ -368,77 +370,76 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
                 continue
             pt_tensor = f.get_tensor(hf_key)
             np_array = pt_tensor.to(torch.float32).numpy()
-            tensor_tg = Tensor(np_array, requires_grad=False)
-            _set_tensor(model, tg_key, tensor_tg)
-
-    print("Re-tying word embeddings for lm_head...")
-    model.lm_head.weight = model.model.embed_tokens.weight
-
+            _set_tensor(model, tg_key, Tensor(np_array, requires_grad=False, dtype=dtype))
+    
+    if model.config.tie_word_embeddings:
+        print("Re-tying word embeddings for lm_head...")
+        model.lm_head.weight = model.model.embed_tokens.weight
     print("All weights loaded and assigned.")
 
 
-def generate(
-    model: LFM2ForCausalLM,
-    tokenizer: AutoTokenizer,
-    prompt: str,
-    max_new_tokens: int,
-    temperature: float = 0.8,
-) -> str:
+def generate(model: LFM2ForCausalLM, tokenizer: AutoTokenizer, prompt: str, max_new_tokens: int, temperature: float = 0.8) -> str:
     Tensor.training = False
     print("\n--- Starting Text Generation ---")
-
-    messages = [
-        {"role": "user", "content": prompt},
-    ]
-
-    prompt_tokens = tokenizer.apply_chat_template(
-        messages, 
-        add_generation_prompt=True,
-        tokenize=True
-    )
     
-    tokens = [t for t in prompt_tokens]
-    input_ids = Tensor([tokens])
-    # Initialize past_states correctly for both operator types
-    past_states = [None] * len(model.model.layers)
-    start_pos = 0
+    messages = [{"role": "user", "content": prompt}]
+    prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+    tokens = list(prompt_tokens)
 
-    print("Processing prompt...")
-    outputs = model(input_ids, past_states, start_pos=start_pos)
-    logits, past_states = outputs.logits, outputs.past_key_values
-    start_pos += len(tokens)
+    def sample(logits: Tensor) -> int:
+        if temperature == 0: return logits.argmax().item()
+        probs = (logits / temperature).softmax()
+        return (probs.cumsum() > Tensor.uniform(1).item()).argmax().item()
 
-    next_token_logits = logits[0, -1, :]
-    if temperature == 0:
-        next_token_id = next_token_logits.argmax().item()
-    else:
-        probs = (next_token_logits / temperature).softmax()
-        sample = Tensor.uniform(1).item()
-        next_token_id = (probs.cumsum() > sample).argmax().item()
-    tokens.append(next_token_id)
-
-    print("Generating new tokens...")
-    print(tokenizer.decode(prompt_tokens), end="", flush=True)
-    print(tokenizer.decode([next_token_id]), end="", flush=True)
-
-    for _ in range(max_new_tokens - 1):
-        input_ids = Tensor([[next_token_id]])
-        outputs = model(input_ids, past_states, start_pos=start_pos)
-        logits, past_states = outputs.logits, outputs.past_key_values
-        start_pos += 1
-
-        next_token_logits = logits[0, -1, :]
-        if temperature == 0:
-            next_token_id = next_token_logits.argmax().item()
-        else:
-            probs = (next_token_logits / temperature).softmax()
-            sample = Tensor.uniform(1).item()
-            next_token_id = (probs.cumsum() > sample).argmax().item()
-
+    def decode_one_token(next_token_id: int):
         tokens.append(next_token_id)
         print(tokenizer.decode([next_token_id]), end="", flush=True)
-        if next_token_id == tokenizer.eos_token_id:
-            break
 
+    if model.config.use_paged_attention:
+        batch_idx_int = -1
+        try:
+            model.reset_request_state()
+            batch_idx_int = model.page_table.allocate()
+            batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
+            max_len = len(tokens) + max_new_tokens
+            model.page_table.reserve(batch_idx_int, max_len)
+
+            print("Processing prompt...")
+            outputs = model(Tensor([tokens]), start_pos=0, batch_idx=batch_idx_tensor, seq_lens=[len(tokens)])
+            start_pos = len(tokens)
+            next_token = sample(outputs.logits[0, -1, :])
+            
+            print("Generating new tokens...")
+            print(tokenizer.decode(prompt_tokens), end="", flush=True)
+            decode_one_token(next_token)
+
+            for _ in range(max_new_tokens - 1):
+                outputs = model(Tensor([[next_token]]), start_pos=start_pos, batch_idx=batch_idx_tensor, seq_lens=[start_pos + 1])
+                start_pos += 1
+                next_token = sample(outputs.logits[0, -1, :])
+                decode_one_token(next_token)
+                if next_token == tokenizer.eos_token_id: break
+        finally:
+            if batch_idx_int != -1: model.page_table.erase(batch_idx_int)
+    else: # Standard generation
+        past_states = [None] * len(model.model.layers)
+        print("Processing prompt...")
+        outputs = model(Tensor([tokens]), past_states, start_pos=0)
+        start_pos = len(tokens)
+        past_states = outputs.past_key_values
+        next_token = sample(outputs.logits[0, -1, :])
+
+        print("Generating new tokens...")
+        print(tokenizer.decode(prompt_tokens), end="", flush=True)
+        decode_one_token(next_token)
+
+        for _ in range(max_new_tokens - 1):
+            outputs = model(Tensor([[next_token]]), past_states, start_pos=start_pos)
+            start_pos += 1
+            past_states = outputs.past_key_values
+            next_token = sample(outputs.logits[0, -1, :])
+            decode_one_token(next_token)
+            if next_token == tokenizer.eos_token_id: break
+    
     print("\n--- Generation Complete ---")
     return tokenizer.decode(tokens)

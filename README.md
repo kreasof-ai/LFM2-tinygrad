@@ -25,11 +25,13 @@ Currently, inference is **very slow**. This is an expected limitation of tinygra
 
 Here is a performance comparison against the official PyTorch implementation on an AMD RX 6700 XT:
 
-| Implementation            | Time Taken (s)  | Tokens/sec |
-| --------------------------------------------------| --------------- | ---------- |
-| Hugging Face (PyTorch)    | 4.34            | 29.50      |
-| Naive tinygrad            | 343.54          | 0.37       |
-| Paged tinygrad            | 364.71          | 0.35       |
+| Implementation                 | Time Taken (s)  | Tokens/sec |
+| ------------------------------ | --------------- | ---------- |
+| Hugging Face (PyTorch)         | 2.3251          | 27.53      |
+| Standard tinygrad (FP32)       | 61.8868         | 1.03       |
+| Standard tinygrad (FP16)       | 204.9295        | 0.31       |
+| Paged tinygrad (FP32)          | 74.3688         | 0.86       |
+| Paged tinygrad (FP16)          | 128.8714        | 0.50       |
 
 *As shown, the experimental Paged Attention does not yet improve speed, as the bottleneck remains in kernel compilation, not memory access.*
 
