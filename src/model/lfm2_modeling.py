@@ -215,7 +215,9 @@ class SwiGLU:
         self.w3 = linear_class(hidden_size, intermediate_size, bias=False)
         self.w2 = linear_class(intermediate_size, hidden_size, bias=False)
     def __call__(self, x: Tensor) -> Tensor:
-        return self.w2(self.w1(x).silu() * self.w3(x))
+        w1 = self.w1(x).silu()
+        w3 = self.w3(x.contiguous_backward())  # this fixes a strange fusion that makes tensor cores miss
+        return self.w2(w1 * w3)
 
 class LFM2DecoderLayer:
     def __init__(self, config: LFM2Config, is_attention_block: bool, linear_class: Type = Linear):
