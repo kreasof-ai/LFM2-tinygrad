@@ -446,13 +446,6 @@ class LFM2ForCausalLM:
 
         return model
 
-def _set_tensor(model: Any, key: str, tensor: Tensor):
-    attrs = key.split('.')
-    target = model
-    for attr in attrs[:-1]:
-        target = getattr(target, attr) if not attr.isdigit() else target[int(attr)]
-    setattr(target, attrs[-1], tensor)
-
 def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.safetensors"):
     """
     Loads weights from a Hugging Face safetensors file into the tinygrad model.

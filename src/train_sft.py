@@ -107,28 +107,20 @@ def main(args):
     print(f"--- Starting SFT Training for {args.model_id} on {Device.DEFAULT} ---")
 
     # 1. Load Model and Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
-
-    config_path = hf_hub_download(repo_id=args.model_id, filename="config.json")
-    with open(config_path) as f: config_dict = json.load(f)
-    config = LFM2Config.from_hf_config(config_dict)
-    
-    # --- Handle new configuration flags ---
     if args.use_paged_attention:
         print("\n[Warning] Paged attention is not recommended for fixed-shape SFT and will be disabled.")
-    config.use_paged_attention = False # Always use standard attention for this script
 
     if args.use_fp16:
         print("\n--- FP16 Training Enabled ---")
-        config.dtype = dtypes.float16
     else:
         print("\n--- FP32 Training Enabled ---")
-        config.dtype = dtypes.float32
-    # --- End of new flag handling ---
-
-    model = LFM2ForCausalLM(config)
-    load_from_hf(model, args.model_id)
+    
+    model = LFM2ForCausalLM.from_pretrained(
+        args.model_id,
+        torch_dtype="float16" if args.use_fp16 else "float32",
+    )
+    tokenizer = model.tokenizer
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     
     print("\n--- Model & MFU Setup ---")
     flops_per_step = 0
