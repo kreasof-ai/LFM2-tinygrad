@@ -1,6 +1,51 @@
 # FILE: src/extra/quantization.py
 from tinygrad import Tensor, dtypes, Device
 
+def Int8Linear():
+  """
+  An 8-bit quantized linear layer for tinygrad.
+  Weights are quantized to int8, with a per-channel float16 scale.
+  """
+  class _Int8Linear:
+    def __init__(self, in_features, out_features, bias=False):
+      assert not bias, "bias not supported in Int8Linear"
+      self.weight = Tensor.empty(out_features, in_features, dtype=dtypes.int8)
+      self.scale = Tensor.empty(out_features, dtype=dtypes.float16)
+
+    def __call__(self, x: Tensor) -> Tensor:
+      # Dequantize on the fly and perform the dot product.
+      # self.weight is (out, in), self.scale is (out,)
+      # self.weight.T is (in, out). Scale broadcasts to columns of .T
+      return x.dot(self.weight.cast(self.scale.dtype).T * self.scale)
+
+    @staticmethod
+    def quantize(state_dict: dict[str, Tensor], device, scale_dtype=dtypes.float16) -> dict[str, Tensor]:
+      """
+      Quantizes a state dictionary of FP32/FP16 weights into INT8 format.
+      """
+      print("--- Starting INT8 Quantization ---")
+      new_state_dict = {}
+      for k, v in state_dict.items():
+        # Same condition as NF4 to select linear layers in LFM2.
+        if (".operator." in k or ".feed_forward." in k) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
+          print(f"  Quantizing {k}...")
+          
+          v_fp = v.cast(dtypes.float32) # Use float32 for stable max calculation
+          
+          # Calculate per-channel (row-wise) scale and add epsilon
+          scale = v_fp.abs().max(axis=1, keepdim=True) / 127.0 + 1e-8
+          
+          # Quantize and round
+          int8_weight = (v_fp / scale).round().cast(dtypes.int8)
+
+          new_state_dict[k] = int8_weight
+          new_state_dict[k.replace(".weight", ".scale")] = scale.squeeze().cast(scale_dtype)
+        else:
+          new_state_dict[k] = v
+      print("--- INT8 Quantization Complete ---")
+      return new_state_dict
+  return _Int8Linear
+
 def NF4Linear(block_size=64):
   """
   A NormalFloat4 (NF4) quantized linear layer for tinygrad.

@@ -16,7 +16,7 @@ if getenv("SEED"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LFM2 inference in tinygrad.")
-    parser.add_argument("--quantize", type=str, default=None, choices=["nf4"], help="Enable NF4 quantization for the model.")
+    parser.add_argument("--quantize", type=str, default=None, choices=["nf4", "int8"], help="Enable NF4 or INT8 quantization for the model.")
     args = parser.parse_args()
 
     # --- 1. Load model and tokenizer ---

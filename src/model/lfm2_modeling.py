@@ -31,7 +31,7 @@ from tinygrad.nn.state import load_state_dict
 
 # Project imports for Paged Attention
 from experimental.paged_attention import PagedKVCache, PageTable
-from extra.quantization import NF4Linear
+from extra.quantization import NF4Linear, Int8Linear
 
 # --- HF-like Model Output ---
 
@@ -285,6 +285,8 @@ class LFM2ForCausalLM:
         
         if config.quantize == "nf4":
             self.linear_class = NF4Linear() # Use default block_size=64
+        elif config.quantize == "int8":
+            self.linear_class = Int8Linear()
         else:
             self.linear_class = Linear
 
@@ -499,7 +501,7 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
             tg_state_dict[tg_key] = Tensor(np_array, requires_grad=False)
 
     # 2. If quantization is enabled, transform the state dictionary
-    if model.config.quantize == "nf4":
+    if model.config.quantize in ["nf4", "int8"]:
         assert hasattr(model, 'linear_class') and hasattr(model.linear_class, 'quantize'), \
             "Model must be initialized with a quantizable linear class."
         device = getattr(model.model.embed_tokens.weight, 'device', Device.DEFAULT)

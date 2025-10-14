@@ -1,4 +1,4 @@
-# /src/speed_test.py (Unified)
+# /src/speed_test.py
 
 import time
 import json
@@ -72,9 +72,10 @@ def run_tinygrad_test(name: str, config_overrides: dict):
     """
     dtype_str = str(config_overrides.get('torch_dtype', 'float32')).split('.')[-1]
     paged_str = 'ON' if config_overrides.get('use_paged_attention', False) else 'OFF'
+    quant_str = config_overrides.get('quantize', 'None')
     
     print(f"\n--- Testing: {name} ---")
-    print(f"  Config: Paged Attention={paged_str}, DType={dtype_str}")
+    print(f"  Config: Paged Attention={paged_str}, DType={dtype_str}, Quantization={quant_str}")
     
     model = lfm2_modeling.LFM2ForCausalLM.from_pretrained(REPO_ID, **config_overrides)
     tokenizer = model.tokenizer
@@ -116,8 +117,10 @@ if __name__ == "__main__":
         ("huggingface", run_huggingface_test, (tokenizer,)),
         ("std_fp32", run_tinygrad_test, ("Standard tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": False})),
         ("std_fp16", run_tinygrad_test, ("Standard tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": False})),
+        ("std_int8", run_tinygrad_test, ("Standard tinygrad (INT8)", {"quantize": "int8", "torch_dtype": "float16"})),
         ("paged_fp32", run_tinygrad_test, ("Paged tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": True})),
         ("paged_fp16", run_tinygrad_test, ("Paged tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": True})),
+        ("paged_int8", run_tinygrad_test, ("Paged tinygrad (INT8)", {"quantize": "int8", "torch_dtype": "float16", "use_paged_attention": True})),
     ]
     
     results = {}
@@ -139,10 +142,18 @@ if __name__ == "__main__":
 
     s16_time, s16_tps = results["std_fp16"]
     print(f"{'Standard tinygrad (FP16)':<30} | {s16_time:<15.4f} | {s16_tps:<10.2f}")
+    
+    if "std_int8" in results:
+        s8_time, s8_tps = results["std_int8"]
+        print(f"{'Standard tinygrad (INT8)':<30} | {s8_time:<15.4f} | {s8_tps:<10.2f}")
 
     p32_time, p32_tps = results["paged_fp32"]
     print(f"{'Paged tinygrad (FP32)':<30} | {p32_time:<15.4f} | {p32_tps:<10.2f}")
 
     p16_time, p16_tps = results["paged_fp16"]
     print(f"{'Paged tinygrad (FP16)':<30} | {p16_time:<15.4f} | {p16_tps:<10.2f}")
+    
+    if "paged_int8" in results:
+        p8_time, p8_tps = results["paged_int8"]
+        print(f"{'Paged tinygrad (INT8)':<30} | {p8_time:<15.4f} | {p8_tps:<10.2f}")
     print("=" * 60)
