@@ -281,6 +281,7 @@ class LFM2Model:
 class LFM2ForCausalLM:
     def __init__(self, config: LFM2Config):
         self.config = config
+        self.tokenizer = None # Will be attached in from_pretrained
         
         if config.quantize == "nf4":
             self.linear_class = NF4Linear() # Use default block_size=64
@@ -334,6 +335,116 @@ class LFM2ForCausalLM:
             past_key_values=new_states if not self.config.use_paged_attention else self.layer_caches,
             hidden_states=all_hidden_states
         )
+
+    def _sample(self, logits: Tensor, do_sample: bool, temperature: float, min_p: float, repetition_penalty: float, generated_tokens: List[int]) -> int:
+        """Helper function for token sampling."""
+        if repetition_penalty != 1.0 and generated_tokens:
+            unique_tokens = Tensor(list(set(generated_tokens)), dtype=dtypes.int32)
+            updates = Tensor.where(logits[unique_tokens] > 0, logits[unique_tokens] / repetition_penalty, logits[unique_tokens] * repetition_penalty)
+            logits = logits.scatter(0, unique_tokens, updates)
+
+        if not do_sample or temperature == 0:
+            return logits.argmax().item()
+        
+        if min_p > 0.0:
+            raise NotImplementedError("Top-p (min_p) sampling is not yet supported in tinygrad due to the lack of a sort operation.")
+
+        probs = (logits / temperature).softmax()
+        return (probs.cumsum() > Tensor.uniform(1).item()).argmax().item()
+    
+    def _decode_one_token(self, next_token_id: int):
+        print(self.tokenizer.decode([next_token_id]), end="", flush=True)
+
+    def generate(self, input_ids: Tensor, max_new_tokens: int, do_sample: bool = False, temperature: float = 1.0, min_p: float = 0.0, repetition_penalty: float = 1.0) -> Tensor:
+        """
+        Generates token sequences, similar to Hugging Face's `generate` method.
+        """
+        assert self.tokenizer is not None, "Tokenizer must be attached to the model. Use LFM2ForCausalLM.from_pretrained(model_id) to load both."
+        Tensor.training = False
+        
+        prompt_len = input_ids.shape[1]
+        tokens = input_ids[0].numpy().tolist()
+
+        if self.config.use_paged_attention:
+            batch_idx_int = -1
+            try:
+                self.reset_request_state()
+                batch_idx_int = self.page_table.allocate()
+                batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
+                max_len = len(tokens) + max_new_tokens
+                self.page_table.reserve(batch_idx_int, max_len)
+
+                outputs = self(Tensor([tokens]), start_pos=0, batch_idx=batch_idx_tensor, seq_lens=[len(tokens)])
+                start_pos = len(tokens)
+                
+                for _ in range(max_new_tokens):
+                    logits = outputs.logits[0, -1, :]
+                    next_token = self._sample(logits, do_sample, temperature, min_p, repetition_penalty, tokens)
+                    tokens.append(next_token)
+                    if next_token == self.tokenizer.eos_token_id: break
+                    
+                    self._decode_one_token(next_token)
+                    
+                    outputs = self(Tensor([[next_token]]), start_pos=start_pos, batch_idx=batch_idx_tensor, seq_lens=[start_pos + 1])
+                    start_pos += 1
+            finally:
+                if batch_idx_int != -1: self.page_table.erase(batch_idx_int)
+        else: # Standard generation
+            past_states = [None] * len(self.model.layers)
+            outputs = self(Tensor([tokens]), past_states, start_pos=0)
+            start_pos = len(tokens)
+            
+            for _ in range(max_new_tokens):
+                past_states = outputs.past_key_values
+                logits = outputs.logits[0, -1, :]
+                next_token = self._sample(logits, do_sample, temperature, min_p, repetition_penalty, tokens)
+                tokens.append(next_token)
+                if next_token == self.tokenizer.eos_token_id: break
+
+                self._decode_one_token(next_token)
+
+                outputs = self(Tensor([[next_token]]), past_states, start_pos=start_pos)
+                start_pos += 1
+
+        return Tensor([tokens], dtype=dtypes.int32)
+    
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs):
+        """
+        Loads a pretrained LFM2 model from the Hugging Face Hub with a transformers-like API.
+        """
+        print(f"--- Loading LFM2 Model: {model_id} ---")
+        
+        # 1. Download and create configuration
+        config_path = hf_hub_download(repo_id=model_id, filename="config.json")
+        with open(config_path) as f:
+            config_dict = json.load(f)
+        config = LFM2Config.from_hf_config(config_dict)
+
+        # 2. Handle kwargs to override config
+        torch_dtype_map = {"bfloat16": dtypes.bfloat16, "float16": dtypes.float16, "float32": dtypes.float32}
+        if "torch_dtype" in kwargs:
+            config.dtype = torch_dtype_map.get(str(kwargs["torch_dtype"]).split('.')[-1], dtypes.float32)
+        if "quantize" in kwargs:
+            config.quantize = kwargs["quantize"]
+        if "use_paged_attention" in kwargs:
+            config.use_paged_attention = kwargs["use_paged_attention"]
+
+        print("\nInitializing model architecture...")
+        model = cls(config)
+
+        # 3. Load weights
+        load_from_hf(model, model_id)
+
+        # 4. Load and attach tokenizer
+        print("\nLoading tokenizer...")
+        model.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        
+        # Warn about unused but common HF kwargs
+        for k in ["device_map", "attn_implementation"]:
+            if k in kwargs: print(f"  [Warning] tinygrad: Argument '{k}' is not used.")
+
+        return model
 
 def _set_tensor(model: Any, key: str, tensor: Tensor):
     attrs = key.split('.')
@@ -414,70 +525,3 @@ def load_from_hf(model: LFM2ForCausalLM, repo_id: str, filename: str = "model.sa
         print("Re-tying word embeddings for lm_head...")
         model.lm_head.weight = model.model.embed_tokens.weight
     print("All weights loaded and assigned.")
-
-
-def generate(model: LFM2ForCausalLM, tokenizer: AutoTokenizer, prompt: str, max_new_tokens: int, temperature: float = 0.8) -> str:
-    Tensor.training = False
-    print("\n--- Starting Text Generation ---")
-    
-    messages = [{"role": "user", "content": prompt}]
-    prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-    tokens = list(prompt_tokens)
-
-    def sample(logits: Tensor) -> int:
-        if temperature == 0: return logits.argmax().item()
-        probs = (logits / temperature).softmax()
-        return (probs.cumsum() > Tensor.uniform(1).item()).argmax().item()
-
-    def decode_one_token(next_token_id: int):
-        tokens.append(next_token_id)
-        print(tokenizer.decode([next_token_id]), end="", flush=True)
-
-    if model.config.use_paged_attention:
-        batch_idx_int = -1
-        try:
-            model.reset_request_state()
-            batch_idx_int = model.page_table.allocate()
-            batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
-            max_len = len(tokens) + max_new_tokens
-            model.page_table.reserve(batch_idx_int, max_len)
-
-            print("Processing prompt...")
-            outputs = model(Tensor([tokens]), start_pos=0, batch_idx=batch_idx_tensor, seq_lens=[len(tokens)])
-            start_pos = len(tokens)
-            next_token = sample(outputs.logits[0, -1, :])
-            
-            print("Generating new tokens...")
-            print(tokenizer.decode(prompt_tokens), end="", flush=True)
-            decode_one_token(next_token)
-
-            for _ in range(max_new_tokens - 1):
-                outputs = model(Tensor([[next_token]]), start_pos=start_pos, batch_idx=batch_idx_tensor, seq_lens=[start_pos + 1])
-                start_pos += 1
-                next_token = sample(outputs.logits[0, -1, :])
-                decode_one_token(next_token)
-                if next_token == tokenizer.eos_token_id: break
-        finally:
-            if batch_idx_int != -1: model.page_table.erase(batch_idx_int)
-    else: # Standard generation
-        past_states = [None] * len(model.model.layers)
-        print("Processing prompt...")
-        outputs = model(Tensor([tokens]), past_states, start_pos=0)
-        start_pos = len(tokens)
-        past_states = outputs.past_key_values
-        next_token = sample(outputs.logits[0, -1, :])
-
-        print("Generating new tokens...")
-        print(tokenizer.decode(prompt_tokens), end="", flush=True)
-        decode_one_token(next_token)
-
-        for _ in range(max_new_tokens - 1):
-            outputs = model(Tensor([[next_token]]), past_states, start_pos=start_pos)
-            start_pos += 1
-            past_states = outputs.past_key_values
-            next_token = sample(outputs.logits[0, -1, :])
-            decode_one_token(next_token)
-            if next_token == tokenizer.eos_token_id: break
-    
-    print("\n--- Generation Complete ---")
-    return tokenizer.decode(tokens)

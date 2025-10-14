@@ -1,9 +1,7 @@
-import json
+# src/run.py
+
 import argparse
-# Third-party imports
-from huggingface_hub import hf_hub_download
-from model.lfm2_modeling import LFM2Config, LFM2ForCausalLM, generate, load_from_hf
-from transformers import AutoTokenizer
+from model.lfm2_modeling import LFM2ForCausalLM
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes
@@ -21,47 +19,44 @@ if __name__ == "__main__":
     parser.add_argument("--quantize", type=str, default=None, choices=["nf4"], help="Enable NF4 quantization for the model.")
     args = parser.parse_args()
 
-    REPO_ID = "LiquidAI/LFM2-350M"
-    print(f"--- Loading LFM2 Model: {REPO_ID} ---")
-
-    # 1. Download and load the configuration
-    config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
-    with open(config_path) as f:
-        config_dict = json.load(f)
-
-    config = LFM2Config.from_hf_config(config_dict)
-
-    # --- Apply quantization if requested ---
-    if args.quantize:
-        print(f"\n--- Enabling {args.quantize.upper()} quantization ---")
-        config.quantize = args.quantize
-        # NF4 uses float16 for scales, so it's best to set the base model dtype
-        # to float16 to avoid excessive casting.
-        config.dtype = dtypes.float16
-
-    print("\nModel configuration:")
-
-    for i in range(config.num_hidden_layers):
-        is_attention = i in config.full_attn_idxs
-        print(f"Layer {i}: {'Attention' if is_attention else 'Convolution'}")
-
-    # 2. Initialize the model structure
-    print("\nInitializing model architecture...")
-    model = LFM2ForCausalLM(config)
-
-    # 3. Load the pretrained weights
-    load_from_hf(model, REPO_ID, filename="model.safetensors")
-
-    # 4. Load the tokenizer
-    print("\nLoading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
-
-    # 5. Run text generation
-    prompt = "The secret to a long and happy life is"
-    generated_text = generate(
-        model,
-        tokenizer,
-        prompt,
-        max_new_tokens=50,
-        temperature=0.3
+    # --- 1. Load model and tokenizer ---
+    model_id = "LiquidAI/LFM2-350M"
+    
+    # NF4 uses float16 for scales, so set the base model dtype to float16 to avoid excessive casting.
+    dtype = dtypes.float16 if args.quantize == "nf4" else dtypes.float32
+    
+    model = LFM2ForCausalLM.from_pretrained(
+        model_id,
+        quantize=args.quantize,
+        torch_dtype="float16" if args.quantize else "float32",
     )
+    tokenizer = model.tokenizer
+
+    # --- 2. Prepare prompt ---
+    prompt = "The secret to a long and happy life is"
+    input_ids_list = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        add_generation_prompt=True,
+        return_tensors=None,
+        tokenize=True,
+    )
+    input_ids = Tensor([input_ids_list], dtype=dtypes.int32)
+
+    # --- 3. Generate answer ---
+    print("\n--- Starting Text Generation ---")
+    print(tokenizer.decode(input_ids_list), end="", flush=True)
+
+    output_ids = model.generate(
+        input_ids,
+        do_sample=True,
+        temperature=0.3,
+        # min_p=0.15, # Not yet supported in tinygrad
+        repetition_penalty=1.05,
+        max_new_tokens=50,
+    )
+
+    # The generate function handles the streaming print, so we just add a final newline.
+    # The returned output is the full sequence.
+    print("\n\n--- Generation Complete ---")
+    full_output_str = tokenizer.decode(output_ids[0].numpy().tolist())
+    # print("\nFull output:\n", full_output_str) # Uncomment to see the full decoded string

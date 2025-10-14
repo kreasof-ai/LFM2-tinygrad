@@ -66,23 +66,29 @@ def run_huggingface_test(tokenizer):
     if torch.cuda.is_available(): torch.cuda.empty_cache()
     return elapsed_time, tokens_per_sec
 
-def run_tinygrad_test(name: str, tokenizer, config: lfm2_modeling.LFM2Config):
+def run_tinygrad_test(name: str, config_overrides: dict):
     """
-    A unified function to test any tinygrad configuration.
-    The behavior (paged vs. standard, FP16 vs. FP32) is controlled by the config object.
+    A unified function to test any tinygrad configuration using the new API.
     """
+    dtype_str = str(config_overrides.get('torch_dtype', 'float32')).split('.')[-1]
+    paged_str = 'ON' if config_overrides.get('use_paged_attention', False) else 'OFF'
+    
     print(f"\n--- Testing: {name} ---")
-    print(f"  Config: Paged Attention={'ON' if config.use_paged_attention else 'OFF'}, DType={config.dtype}")
-    print("Loading model...")
-    model = lfm2_modeling.LFM2ForCausalLM(config)
-    lfm2_modeling.load_from_hf(model, REPO_ID)
+    print(f"  Config: Paged Attention={paged_str}, DType={dtype_str}")
+    
+    model = lfm2_modeling.LFM2ForCausalLM.from_pretrained(REPO_ID, **config_overrides)
+    tokenizer = model.tokenizer
 
+    input_ids_list = tokenizer.apply_chat_template(
+        [{"role": "user", "content": PROMPT}],
+        add_generation_prompt=True, return_tensors=None, tokenize=True,
+    )
+    input_ids = Tensor([input_ids_list], dtype=dtypes.int32)
+    
     print("Generating tokens...")
-    # The unified generate function automatically handles the correct execution path
-    # based on the flags set in the config object.
     start_time = time.perf_counter()
-    _ = lfm2_modeling.generate(
-        model, tokenizer, PROMPT, max_new_tokens=MAX_NEW_TOKENS, temperature=TEMPERATURE
+    _ = model.generate(
+        input_ids, max_new_tokens=MAX_NEW_TOKENS, temperature=TEMPERATURE, do_sample=False
     )
     end_time = time.perf_counter()
     
@@ -102,42 +108,23 @@ if __name__ == "__main__":
     print(f"tinygrad Device: {Device.DEFAULT}")
     print("-" * 50)
 
-    # 1. Load shared resources
+    # Load shared tokenizer
     tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
-    config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
-    with open(config_path) as f: config_dict = json.load(f)
 
-    # 2. Create all necessary configurations
-    config_std_fp32 = lfm2_modeling.LFM2Config.from_hf_config(config_dict)
-    config_std_fp32.use_paged_attention = False
-    config_std_fp32.dtype = dtypes.float32
-
-    config_std_fp16 = lfm2_modeling.LFM2Config.from_hf_config(config_dict)
-    config_std_fp16.use_paged_attention = False
-    config_std_fp16.dtype = dtypes.float16
-
-    config_paged_fp32 = lfm2_modeling.LFM2Config.from_hf_config(config_dict)
-    config_paged_fp32.use_paged_attention = True
-    config_paged_fp32.dtype = dtypes.float32
-    
-    config_paged_fp16 = lfm2_modeling.LFM2Config.from_hf_config(config_dict)
-    config_paged_fp16.use_paged_attention = True
-    config_paged_fp16.dtype = dtypes.float16
-
-    # 3. Define the test battery
+    # Define the test battery using config overrides
     tests_to_run = [
         ("huggingface", run_huggingface_test, (tokenizer,)),
-        ("std_fp32", run_tinygrad_test, ("Standard tinygrad (FP32)", tokenizer, config_std_fp32)),
-        ("std_fp16", run_tinygrad_test, ("Standard tinygrad (FP16)", tokenizer, config_std_fp16)),
-        ("paged_fp32", run_tinygrad_test, ("Paged tinygrad (FP32)", tokenizer, config_paged_fp32)),
-        ("paged_fp16", run_tinygrad_test, ("Paged tinygrad (FP16)", tokenizer, config_paged_fp16)),
+        ("std_fp32", run_tinygrad_test, ("Standard tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": False})),
+        ("std_fp16", run_tinygrad_test, ("Standard tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": False})),
+        ("paged_fp32", run_tinygrad_test, ("Paged tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": True})),
+        ("paged_fp16", run_tinygrad_test, ("Paged tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": True})),
     ]
     
     results = {}
     for key, func, args in tests_to_run:
         results[key] = func(*args)
     
-    # 4. Print final summary
+    # Print final summary
     print("\n\n" + "=" * 60)
     print("           INFERENCE SPEED TEST SUMMARY")
     print("=" * 60)
