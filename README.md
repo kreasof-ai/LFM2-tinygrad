@@ -17,6 +17,17 @@ This repository contains a from-scratch implementation of the **[LFM2 (Liquid Fo
 
 ---
 
+## ✅ Supported Models
+
+Thanks to a flexible configuration loader, this implementation supports these models:
+
+-   [`LiquidAI/LFM2-350M`](https://huggingface.co/LiquidAI/LFM2-350M) (Default)
+-   [`LiquidAI/LFM2-700M`](https://huggingface.co/LiquidAI/LFM2-700M)
+-   [`LiquidAI/LFM2-1.2B`](https://huggingface.co/LiquidAI/LFM2-1.2B)
+-   [`LiquidAI/LFM2-2.6B`](https://huggingface.co/LiquidAI/LFM2-2.6B)
+
+---
+
 ## 🧐 Project Status & Performance
 
 The primary goal of this project is educational: to demonstrate how a cutting-edge architecture can be built and understood in a framework other than PyTorch/TensorFlow.
@@ -24,7 +35,7 @@ The primary goal of this project is educational: to demonstrate how a cutting-ed
 ### Inference Performance
 Currently, inference is **very slow**. This is an expected limitation of tinygrad's current Just-In-Time (JIT) compiler, which is optimized for tensors with **fixed shapes**. Autoregressive decoding, where the sequence length changes at each step, requires re-compiling the computation graph for every new token, hindering performance.
 
-Here is a performance comparison against the official PyTorch implementation on an AMD RX 6700 XT, including new quantization modes:
+Here is a performance comparison (model:`LiquidAI/LFM2-350M`) against the official PyTorch implementation on an AMD RX 6700 XT, including new quantization modes:
 
 | Implementation                 | Time Taken (s) for 64 tokens | Tokens/sec |
 | ------------------------------ | ---------------------------- | ---------- |
