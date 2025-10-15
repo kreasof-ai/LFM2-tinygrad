@@ -87,6 +87,13 @@ class LFM2Config:
             multiple_of = config_dict.get("block_multiple_of", 256)
             intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
 
+        layer_types = config_dict.get("layer_types")
+        if layer_types is not None:
+            full_attn_idxs = [i for i, layer_type in enumerate(layer_types) if layer_type == "full_attention"]
+        else:
+            # Fallback for older models that only have full_attn_idxs
+            full_attn_idxs = config_dict["full_attn_idxs"]
+
         return cls(
             vocab_size=config_dict["vocab_size"],
             hidden_size=config_dict["hidden_size"],
@@ -94,7 +101,7 @@ class LFM2Config:
             num_hidden_layers=config_dict["num_hidden_layers"],
             num_attention_heads=config_dict.get("num_attention_heads", config_dict.get("num_heads")),
             num_key_value_heads=config_dict["num_key_value_heads"],
-            full_attn_idxs=config_dict["full_attn_idxs"],
+            full_attn_idxs=full_attn_idxs,
             conv_kernel_size=config_dict.get("conv_L_cache", 3),
             max_position_embeddings=config_dict["max_position_embeddings"],
             rms_norm_eps=config_dict.get("norm_eps", config_dict.get("block_norm_eps")),
