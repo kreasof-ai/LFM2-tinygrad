@@ -23,8 +23,9 @@ from tinygrad.nn import Embedding, Linear, RMSNorm
 from tinygrad.nn.state import load_state_dict
 
 # Project imports for shared components
-from model.lfm2_modeling import CausalLMOutputWithPast  # Re-use the output dataclass
 from extra.quantization import NF4Linear, Int8Linear
+from utils.rope import _precompute_rope_cache, apply_rotary_pos_emb
+from utils.output import CausalLMOutputWithPast
 
 # --- Configuration ---
 
@@ -64,18 +65,6 @@ class Qwen3Config:
             max_position_embeddings=config_dict["max_position_embeddings"],
             tie_word_embeddings=config_dict.get("tie_word_embeddings", True),
         )
-
-# --- RoPE Helpers (standard implementation, can be shared) ---
-
-def _precompute_rope_cache(dim: int, max_seq_len: int, base: float, dtype) -> Tuple[Tensor, Tensor]:
-    inv_freq = 1.0 / (base ** (Tensor.arange(0, dim, 2, dtype=dtype) / dim))
-    t = Tensor.arange(max_seq_len, dtype=inv_freq.dtype)
-    freqs = t.reshape(-1, 1) * inv_freq.reshape(1, -1)
-    emb = Tensor.cat(freqs, freqs, dim=-1)
-    return emb.cos().contiguous(), emb.sin().contiguous()
-
-def rotate_half(x: Tensor): return Tensor.cat(-x[..., x.shape[-1]//2:], x[..., :x.shape[-1]//2], dim=-1)
-def apply_rotary_pos_emb(q, k, cos, sin): return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
 # --- Model Components ---
 
