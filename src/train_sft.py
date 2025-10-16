@@ -1,6 +1,7 @@
 # src/train_sft.py
 
 import os
+
 os.environ["VIZ"] = "0" # Set this to 1 if you want to see performance profiler after training
 
 if False: # Set true to enable Vulkan backend via WebGPU
@@ -27,6 +28,7 @@ from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
 
 from model.lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf, GroupedQueryAttention, LFM2ConvOperator
+from model.qwen3_modeling import Qwen3ForCausalLM
 from extra.lora import apply_lora_to_model, get_lora_parameters
 
 # --- Dataset and Preprocessing ---
@@ -114,11 +116,17 @@ def main(args):
         print("\n--- FP16 Training Enabled ---")
     else:
         print("\n--- FP32 Training Enabled ---")
-    
-    model = LFM2ForCausalLM.from_pretrained(
+
+    if args.model == "LFM2":
+        CausalLM = LFM2ForCausalLM
+    elif args.model == "Qwen3":
+        CausalLM = Qwen3ForCausalLM
+
+    model = CausalLM.from_pretrained(
         args.model_id,
         torch_dtype="float16" if args.use_fp16 else "float32",
     )
+
     tokenizer = model.tokenizer
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     
@@ -208,6 +216,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
     # Model and Data
+    parser.add_argument("--model", type=str, default="LFM2", choices=["LFM2", "Qwen3"], help="Supported model choice.")
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     parser.add_argument("--dataset_id", type=str, default="mlabonne/FineTome-100k", help="Hugging Face dataset ID for SFT")
     # Training Hyperparameters

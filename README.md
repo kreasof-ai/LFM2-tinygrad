@@ -12,8 +12,8 @@ This repository contains from-scratch implementations of the **[LFM2 (Liquid Fou
 -   🚀 **Inference Ready**: Includes a unified script for running text generation with pretrained LFM2 and Qwen3 models.
 -   💡 **Quantization Ready**: Built-in support for **INT8** and **NormalFloat4 (NF4)** quantization, allowing for a reduced memory footprint during inference.
 -   🔬 **Experimental Paged Attention**: (LFM2-only) An implementation of paged attention to explore efficient memory management for the KV cache, inspired by vLLM.
--   🎓 **Supervised Fine-Tuning (SFT)**: (LFM2-only) A complete training script (`src/train_sft.py`) is provided, enabling you to fine-tune LFM2 on your own datasets.
--   🔧 **LoRA Support**: The LFM2 training script includes built-in support for **Low-Rank Adaptation (LoRA)**, allowing for efficient, low-memory fine-tuning.
+-   🎓 **Supervised Fine-Tuning (SFT)**: A complete training script (`src/train_sft.py`) is provided, enabling you to fine-tune LFM2 and Qwen3 on your own datasets.
+-   🔧 **LoRA Support**: The training script includes built-in support for **Low-Rank Adaptation (LoRA)**, allowing for efficient, low-memory fine-tuning.
 
 ---
 
@@ -106,13 +106,14 @@ python src/run.py --quantize nf4
 python src/run.py --model Qwen3 --model_id "Qwen/Qwen3-0.6B" --quantize int8
 ```
 
-#### Supervised Fine-Tuning (SFT) with LoRA (LFM2-only)
-The `train_sft.py` script allows you to fine-tune the LFM2 model on any conversational dataset from the Hugging Face Hub. LoRA is enabled by default for efficiency. **Note: SFT is currently only supported for the LFM2 architecture.**
+#### Supervised Fine-Tuning (SFT) with LoRA
+The `train_sft.py` script allows you to fine-tune  on any conversational dataset from the Hugging Face Hub. LoRA is enabled by default for efficiency. 
 
 Here is an example command to run a short training job on the `mlabonne/FineTome-100k` dataset:
 
 ```bash
 python src/train_sft.py \
+    --model "LFM2"
     --model_id "LiquidAI/LFM2-350M" \
     --dataset_id "mlabonne/FineTome-100k" \
     --use_lora \
@@ -164,7 +165,6 @@ The output below from `debug_prefilling.py` shows a perfect match across all lay
 -   [ ] **Improve Inference Speed:** Investigate workarounds for the dynamic shape problem, potentially by padding to fixed sequence length buckets or exploring future tinygrad features.
 -   [ ] **Optimize Paged Attention:** Refine the paged attention CUDA/Metal kernels once the core JIT issues are addressed.
 -   [ ] **Integrate Flash Attention:** Integrate the existing `flash_attention.py` implementation into the main model as an optional, high-performance attention mechanism.
--   [ ] **Add SFT support for Qwen3**: Adapt the `train_sft.py` script to support the Qwen3 architecture.
 
 ## Acknowledgments
 This project was heavily inspired by the following resources:
