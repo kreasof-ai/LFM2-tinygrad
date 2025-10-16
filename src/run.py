@@ -2,6 +2,7 @@
 
 import argparse
 from model.lfm2_modeling import LFM2ForCausalLM
+from model.qwen3_modeling import Qwen3ForCausalLM
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes
@@ -16,23 +17,28 @@ if getenv("SEED"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LFM2 inference in tinygrad.")
+    parser.add_argument("--use_fp16", action="store_true", help="Enable FP16 training for lower memory usage")
     parser.add_argument("--quantize", type=str, default=None, choices=["nf4", "int8"], help="Enable NF4 or INT8 quantization for the model.")
+    parser.add_argument("--model", type=str, default="LFM2", choices=["LFM2", "Qwen3"], help="Supported model choice.")
+    parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     args = parser.parse_args()
-
-    # --- 1. Load model and tokenizer ---
-    model_id = "LiquidAI/LFM2-350M"
     
     # NF4 uses float16 for scales, so set the base model dtype to float16 to avoid excessive casting.
     dtype = dtypes.float16 if args.quantize == "nf4" else dtypes.float32
     
-    model = LFM2ForCausalLM.from_pretrained(
-        model_id,
+    if args.model == "LFM2":
+        CausalLM = LFM2ForCausalLM
+    elif args.model == "Qwen3":
+        CausalLM = Qwen3ForCausalLM
+
+    model = CausalLM.from_pretrained(
+        args.model_id,
         quantize=args.quantize,
-        torch_dtype="float16" if args.quantize else "float32",
+        torch_dtype="float16" if args.use_fp16 or args.quantize else "float32",
     )
+
     tokenizer = model.tokenizer
 
-    # --- 2. Prepare prompt ---
     prompt = "The secret to a long and happy life is"
     input_ids_list = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -42,7 +48,6 @@ if __name__ == "__main__":
     )
     input_ids = Tensor([input_ids_list], dtype=dtypes.int32)
 
-    # --- 3. Generate answer ---
     print("\n--- Starting Text Generation ---")
     print(tokenizer.decode(input_ids_list), end="", flush=True)
 
