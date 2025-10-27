@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
 # Use the new unified model
-from model.lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
+from model import lfm2_modeling
 
 # --- Comparison Helper ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
@@ -51,19 +51,18 @@ if __name__ == "__main__":
 
     # 2. Load tinygrad model
     print("\nLoading tinygrad model...")
-    config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
-    with open(config_path) as f:
-        config_dict = json.load(f)
-    config_tg = LFM2Config.from_hf_config(config_dict)
 
+    config_overrides = {}
+    
     if args.paged:
         print("\n*** RUNNING IN PAGED ATTENTION MODE ***\n")
-        config_tg.use_paged_attention = True
+        config_overrides = {
+            "use_paged_attention": True
+        }
     else:
         print("\n*** RUNNING IN STANDARD MODE ***\n")
 
-    model_tg = LFM2ForCausalLM(config_tg)
-    load_from_hf(model_tg, REPO_ID)
+    model_tg = lfm2_modeling.LFM2ForCausalLM.from_pretrained(REPO_ID, **config_overrides)
 
     # 3. Prepare identical inputs
     input_ids_pt = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
@@ -122,7 +121,7 @@ if __name__ == "__main__":
 
     # C. Compare Layer Outputs
     if all_checks_passed:
-        for i in range(config_tg.num_hidden_layers):
+        for i in range(model_tg.config.num_hidden_layers):
             if not compare_tensors(hidden_states_tg[i + 1], hidden_states_pt[i + 1], f"Layer {i} Output"):
                 print(f"\n‼️ DIVERGENCE DETECTED AT LAYER {i} ‼️")
                 all_checks_passed = False

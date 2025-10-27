@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
 # Use the new unified model
-from model.lfm2_modeling import LFM2ForCausalLM, LFM2Config, load_from_hf, hf_hub_download
+from model import lfm2_modeling
 from experimental.paged_attention import PagedKVCache # Needed for type checking in cache comparison
 
 # --- Comparison Helper ---
@@ -49,7 +49,7 @@ def reconstruct_from_paged_cache(paged_cache: PagedKVCache, batch_idx: int, seq_
     return k_logical, v_logical
 
 # --- Unified Cache Comparison ---
-def compare_caches(tg_states: list, hf_cache, config: LFM2Config, name: str, batch_idx: int = 0, current_seq_len: int = 0) -> bool:
+def compare_caches(tg_states: list, hf_cache, config: lfm2_modeling.LFM2Config, name: str, batch_idx: int = 0, current_seq_len: int = 0) -> bool:
     """Compares tinygrad's caches (standard or paged) with the Hugging Face cache."""
     print(f"\n--- Comparing Caches: {name} (Seq Len: {current_seq_len}) ---")
     all_match = True
@@ -89,18 +89,20 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
 
     # 2. Load tinygrad model
-    config_path = hf_hub_download(repo_id=REPO_ID, filename="config.json")
-    with open(config_path) as f: config_dict = json.load(f)
-    config_tg = LFM2Config.from_hf_config(config_dict)
-
+    print("\nLoading tinygrad model...")
+    
+    config_overrides = {}
+    
     if args.paged:
         print("\n*** RUNNING IN PAGED ATTENTION MODE ***\n")
-        config_tg.use_paged_attention = True
+        config_overrides = {
+            "use_paged_attention": True
+        }
     else:
         print("\n*** RUNNING IN STANDARD MODE ***\n")
-    
-    model_tg = LFM2ForCausalLM(config_tg)
-    load_from_hf(model_tg, REPO_ID)
+
+    model_tg = lfm2_modeling.LFM2ForCausalLM.from_pretrained(REPO_ID, **config_overrides)
+
 
     # 3. Prepare inputs and paged-mode controller if needed
     input_ids_pt = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
@@ -133,7 +135,7 @@ if __name__ == "__main__":
         logits_tg_prefill = tg_prefill_out.logits
         
         if not compare_tensors(logits_tg_prefill[:, -1, :], logits_pt_prefill[:, -1, :], "Prefill - Final Logit"): exit()
-        if not compare_caches(cache_tg_prefill, cache_hf_prefill, config_tg, "Prefill Cache", batch_idx_int, prompt_len): exit()
+        if not compare_caches(cache_tg_prefill, cache_hf_prefill, model_tg.config, "Prefill Cache", batch_idx_int, prompt_len): exit()
         print("\n✅ Prefill stage matches perfectly!")
 
         # --- 5. DECODING STAGE COMPARISON ---
@@ -164,7 +166,7 @@ if __name__ == "__main__":
             logits_tg_decode = tg_decode_out.logits
             
             if not compare_tensors(logits_tg_decode, logits_pt_decode, f"Decode Step {i} - Logits"): exit()
-            if not compare_caches(cache_tg_decode, cache_hf_decode, config_tg, f"Decode Step {i} - Cache", batch_idx_int, current_seq_len + 1): exit()
+            if not compare_caches(cache_tg_decode, cache_hf_decode, model_tg.config, f"Decode Step {i} - Cache", batch_idx_int, current_seq_len + 1): exit()
                 
             logits_pt_prefill, current_cache_hf = logits_pt_decode, cache_hf_decode
             logits_tg_prefill, current_cache_tg = logits_tg_decode, cache_tg_decode
