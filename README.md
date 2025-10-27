@@ -2,18 +2,21 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/apache-2-0)
 
-This repository contains from-scratch implementations of the **[LFM2 (Liquid Foundation Model 2)](https://www.liquid.ai/blog/liquid-foundation-models-v2-our-second-series-of-generative-ai-models)** and **[Qwen3](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f)** architectures using **[tinygrad](https://github.com/tinygrad/tinygrad)**, the minimalist deep learning framework. The project focuses on educational value, numerical correctness against official implementations, and exploring advanced features like quantization, paged attention, and LoRA for supervised fine-tuning.
+This repository contains from-scratch implementations of the **[LFM2 (Liquid Foundation Model 2)](https://www.liquid.ai/blog/liquid-foundation-models-v2-our-second-series-of-generative-ai-models)** and **[Qwen3](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f)** architectures using **[tinygrad](https://github.com/tinygrad/tinygrad)**.
+
+Built upon a **unified, extensible base modeling architecture**, this project serves as an educational tool to demonstrate how modern LLMs can be built, fine-tuned, and verified for numerical correctness. It explores advanced features like quantization, paged attention, and LoRA, with a forward-looking goal of supporting diverse model types on commodity and non-NVIDIA GPUs.
 
 ---
 
 ## 🌟 Core Features
 
+-   ✅ **Unified Architecture**: Built on a modular `base_modeling.py` that simplifies the adaptation of new Hugging Face models.
 -   ✅ **Numerically Correct Implementations**: Rigorously verified against official Hugging Face Transformers implementations to ensure matching outputs.
--   🚀 **Inference Ready**: Includes a unified script for running text generation with pretrained LFM2 and Qwen3 models.
--   💡 **Quantization Ready**: Built-in support for **INT8** and **NormalFloat4 (NF4)** quantization, allowing for a reduced memory footprint during inference.
--   🔬 **Experimental Paged Attention**: (LFM2-only) An implementation of paged attention to explore efficient memory management for the KV cache, inspired by vLLM.
--   🎓 **Supervised Fine-Tuning (SFT)**: A complete training script (`src/train_sft.py`) is provided, enabling you to fine-tune LFM2 and Qwen3 on your own datasets.
--   🔧 **LoRA Support**: The training script includes built-in support for **Low-Rank Adaptation (LoRA)**, allowing for efficient, low-memory fine-tuning.
+-   🚀 **Multi-Model Support**: Ready-to-use implementations for both LFM2 and Qwen3 model families.
+-   🎓 **Supervised Fine-Tuning (SFT)**: A complete training script (`src/train_sft.py`) is provided, enabling you to fine-tune models on your own datasets.
+-   🔧 **LoRA Support**: Built-in support for **Low-Rank Adaptation (LoRA)**, allowing for efficient, low-memory fine-tuning.
+-   💡 **Quantization Ready**: Support for **INT8** and **NormalFloat4 (NF4)** quantization to reduce memory footprint during inference.
+-   🔬 **Advanced Attention Mechanisms**: Includes experimental implementations of **Paged Attention** (for efficient KV cache management) and **Flash Attention**.
 
 ---
 
@@ -107,7 +110,7 @@ python src/run.py --model Qwen3 --model_id "Qwen/Qwen3-0.6B" --quantize int8
 ```
 
 #### Supervised Fine-Tuning (SFT) with LoRA
-The `train_sft.py` script allows you to fine-tune  on any conversational dataset from the Hugging Face Hub. LoRA is enabled by default for efficiency. 
+The `train_sft.py` script allows you to fine-tune on any conversational dataset from the Hugging Face Hub. LoRA is enabled by default for efficiency.
 
 Here is an example command to run a short training job on the `mlabonne/FineTome-100k` dataset:
 
@@ -162,9 +165,27 @@ The output below from `debug_prefilling.py` shows a perfect match across all lay
 
 ## 🗺️ Roadmap
 
--   [ ] **Improve Inference Speed:** Investigate workarounds for the dynamic shape problem, potentially by padding to fixed sequence length buckets or exploring future tinygrad features.
--   [ ] **Optimize Paged Attention:** Refine the paged attention CUDA/Metal kernels once the core JIT issues are addressed.
--   [ ] **Integrate Flash Attention:** Integrate the existing `flash_attention.py` implementation into the main model as an optional, high-performance attention mechanism.
+Our vision is to evolve this project into a comprehensive library for exploring and training diverse LLMs on a wide range of hardware, especially commodity GPUs.
+
+-   [ ] **Expand Architectural Support:**
+    -   **Goal:** Adapt more diverse model architectures from the Hugging Face ecosystem. The new `base_modeling.py` provides a strong foundation for rapid prototyping.
+    -   **Targets:**
+        -   **Mixture-of-Experts (MoE):** Implement models like Mixtral and Qwen2-MoE to explore sparse activation.
+        -   **State Space Models (SSM):** Adapt architectures like Mamba or Jamba.
+        -   **Vision Language Models (VLM):** Extend the framework to handle multi-modal inputs.
+
+-   [ ] **Champion Alternative & Commodity GPUs:**
+    -   **Goal:** Become a go-to library for running and fine-tuning LLMs on non-NVIDIA hardware by leveraging tinygrad's broad backend support (AMD, Intel, Apple Silicon).
+    -   **Actions:**
+        -   Provide extensive benchmarking results across different hardware.
+        -   Develop hardware-specific optimization guides.
+        -   Ensure all features (quantization, LoRA, etc.) are robustly tested across tinygrad's primary backends.
+
+-   [ ] **Core Performance Enhancements:**
+    -   **Improve Inference Speed:** Investigate workarounds for the dynamic shape problem, potentially by padding to fixed sequence length buckets or exploring future tinygrad JIT enhancements.
+    -   **Optimize Paged Attention:** Refine the paged attention kernels once the core JIT issues are addressed.
+
+---
 
 ## Acknowledgments
 This project was heavily inspired by the following resources:
