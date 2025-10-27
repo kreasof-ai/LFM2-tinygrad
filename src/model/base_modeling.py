@@ -31,6 +31,7 @@ class BaseConfig(ABC):
     hidden_size: int = 1024
     intermediate_size: int = 3072
     num_hidden_layers: int = 28
+    head_dim: int = 128
     num_attention_heads: int = 16
     num_key_value_heads: int = 8
     rms_norm_eps: float = 1e-6
@@ -68,7 +69,7 @@ class BaseAttention:
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = config.head_dim
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
         self.q_proj = linear_class(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -118,7 +119,7 @@ class BaseAttention:
         else:
             attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
         
-        attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.num_heads * self.head_dim)
         return self.o_proj(attn_output), present_kv
 
 class BaseMLP:
@@ -138,7 +139,7 @@ class BaseModel(ABC):
         self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.head_dim = config.head_dim
         cos_cache, sin_cache = _precompute_rope_cache(dim=self.head_dim, max_seq_len=config.max_position_embeddings, base=config.rope_theta, dtype=config.dtype)
         self.cos_cache = cos_cache
         self.sin_cache = sin_cache

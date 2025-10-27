@@ -33,10 +33,12 @@ class LFM2Config(BaseConfig):
         
         layer_types = config_dict.get("layer_types")
         full_attn_idxs = [i for i, t in enumerate(layer_types) if t == "full_attention"] if layer_types else config_dict["full_attn_idxs"]
+        head_dim = config_dict["hidden_size"] // config_dict.get("num_attention_heads", config_dict.get("num_heads"))
 
         return cls(
             vocab_size=config_dict["vocab_size"],
             hidden_size=config_dict["hidden_size"],
+            head_dim=head_dim,
             intermediate_size=intermediate_size,
             num_hidden_layers=config_dict["num_hidden_layers"],
             num_attention_heads=config_dict.get("num_attention_heads", config_dict.get("num_heads")),
