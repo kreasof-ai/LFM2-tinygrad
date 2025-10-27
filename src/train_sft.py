@@ -27,7 +27,7 @@ from tinygrad.nn.optim import AdamW
 from tinygrad.nn.state import get_parameters
 from tinygrad.helpers import GlobalCounters
 
-from model.lfm2_modeling import LFM2Config, LFM2ForCausalLM, load_from_hf, GroupedQueryAttention, LFM2ConvOperator
+from model.lfm2_modeling import LFM2ForCausalLM, BaseAttention, LFM2ConvOperator
 from model.qwen3_modeling import Qwen3ForCausalLM
 from extra.lora import apply_lora_to_model, get_lora_parameters
 
@@ -89,7 +89,7 @@ def estimate_mfu_flops(model: LFM2ForCausalLM, batch_size: int, seq_len: int) ->
     fwd_flops = 0
     for layer in model.model.layers:
         fwd_flops += 6 * B * S * H * I
-        if isinstance(layer.operator, GroupedQueryAttention):
+        if isinstance(layer.operator, BaseAttention):
             fwd_flops += 4 * B * S * H * H + 4 * B * (S**2) * H
         elif isinstance(layer.operator, LFM2ConvOperator):
             fwd_flops += (2 * B * S * H * (3 * H)) + (2 * B * S * H * H) + 2 * B * H * S * K
