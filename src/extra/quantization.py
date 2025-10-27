@@ -20,30 +20,23 @@ def Int8Linear():
 
     @staticmethod
     def quantize(state_dict: dict[str, Tensor], device, scale_dtype=dtypes.float16) -> dict[str, Tensor]:
-      """
-      Quantizes a state dictionary of FP32/FP16 weights into INT8 format.
-      """
-      print("--- Starting INT8 Quantization ---")
-      new_state_dict = {}
-      for k, v in state_dict.items():
-        # Same condition as NF4 to select linear layers in LFM2.
-        if (".operator." in k or ".feed_forward." in k) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
-          print(f"  Quantizing {k}...")
-          
-          v_fp = v.cast(dtypes.float32) # Use float32 for stable max calculation
-          
-          # Calculate per-channel (row-wise) scale and add epsilon
-          scale = v_fp.abs().max(axis=1, keepdim=True) / 127.0 + 1e-8
-          
-          # Quantize and round
-          int8_weight = (v_fp / scale).round().cast(dtypes.int8)
-
-          new_state_dict[k] = int8_weight
-          new_state_dict[k.replace(".weight", ".scale")] = scale.squeeze().cast(scale_dtype)
-        else:
-          new_state_dict[k] = v
-      print("--- INT8 Quantization Complete ---")
-      return new_state_dict
+        """ Quantizes a state dictionary of FP32/FP16 weights into INT8 format. """
+        print("--- Starting INT8 Quantization ---")
+        new_state_dict = {}
+        # Generalized condition to target linear layers in attention and MLP blocks
+        quantizable_substrings = [".self_attn.", ".mlp.", ".operator.", ".feed_forward."]
+        for k, v in state_dict.items():
+            if any(sub in k for sub in quantizable_substrings) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
+                print(f"  Quantizing {k}...")
+                v_fp = v.cast(dtypes.float32)
+                scale = v_fp.abs().max(axis=1, keepdim=True) / 127.0 + 1e-8
+                int8_weight = (v_fp / scale).round().cast(dtypes.int8)
+                new_state_dict[k] = int8_weight
+                new_state_dict[k.replace(".weight", ".scale")] = scale.squeeze().cast(scale_dtype)
+            else:
+                new_state_dict[k] = v
+        print("--- INT8 Quantization Complete ---")
+        return new_state_dict
   return _Int8Linear
 
 def NF4Linear(block_size=64):
@@ -84,34 +77,21 @@ def NF4Linear(block_size=64):
 
     @staticmethod
     def quantize(state_dict: dict[str, Tensor], device, scale_dtype=dtypes.float16) -> dict[str, Tensor]:
-      """
-      Quantizes a state dictionary of FP32/FP16 weights into NF4 format.
-      """
-      print("--- Starting NF4 Quantization ---")
-      new_state_dict = {}
-      for k, v in state_dict.items():
-        # Condition to select which layers to quantize.
-        # For LFM2, linear layers are in 'operator' (attention/conv) or 'feed_forward' blocks.
-        
-        # --- FIX START ---
-        # The original condition was too broad. This new condition explicitly excludes 'conv.weight'.
-        if (".operator." in k or ".feed_forward." in k) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
-        # --- FIX END ---
-            print(f"  Quantizing {k}...")
-            # Reshape into blocks for quantization.
-            grouped = v.reshape(-1, block_size)
-            
-            # Calculate scale (absmax) for each block. Add epsilon for stability.
-            scale = grouped.abs().max(axis=1, keepdim=True) + 1e-8
-            
-            # Normalize, find the closest NF4 value, and cast to uint8.
-            coded = ((grouped / scale).unsqueeze(-1) - CODE.to(v.device)).abs().argmin(axis=-1).cast(dtypes.uint8).flatten()
-            
-            # Pack two 4-bit values into one uint8 byte.
-            new_state_dict[k] = (coded[::2] << 4) | coded[1::2]
-            new_state_dict[k.replace(".weight", ".scale")] = scale.cast(scale_dtype)
-        else:
-            new_state_dict[k] = v # Pass through non-quantized tensors (embeddings, norms, etc.).
-      print("--- NF4 Quantization Complete ---")
-      return new_state_dict
+        """ Quantizes a state dictionary of FP32/FP16 weights into NF4 format. """
+        print("--- Starting NF4 Quantization ---")
+        new_state_dict = {}
+        # Generalized condition to target linear layers in attention and MLP blocks
+        quantizable_substrings = [".self_attn.", ".mlp.", ".operator.", ".feed_forward."]
+        for k, v in state_dict.items():
+            if any(sub in k for sub in quantizable_substrings) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
+                print(f"  Quantizing {k}...")
+                grouped = v.reshape(-1, block_size)
+                scale = grouped.abs().max(axis=1, keepdim=True) + 1e-8
+                coded = ((grouped / scale).unsqueeze(-1) - CODE.to(v.device)).abs().argmin(axis=-1).cast(dtypes.uint8).flatten()
+                new_state_dict[k] = (coded[::2] << 4) | coded[1::2]
+                new_state_dict[k.replace(".weight", ".scale")] = scale.cast(scale_dtype)
+            else:
+                new_state_dict[k] = v
+        print("--- NF4 Quantization Complete ---")
+        return new_state_dict
   return _NF4Linear

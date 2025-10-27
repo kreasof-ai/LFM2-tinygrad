@@ -1,0 +1,332 @@
+# src/model/base_modeling.py
+
+import json
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple, Type
+
+# Third-party imports
+from huggingface_hub import hf_hub_download
+from safetensors import safe_open
+import torch  # only used for converting weights
+from transformers import AutoTokenizer
+
+# tinygrad imports
+from tinygrad import Tensor, dtypes, Device
+from tinygrad.nn import Embedding, Linear, RMSNorm
+from tinygrad.nn.state import load_state_dict, get_parameters
+
+# Project imports for shared components
+from experimental.paged_attention import PagedKVCache, PageTable
+from experimental.flash_attention import flash_attn
+from extra.quantization import NF4Linear, Int8Linear
+from utils.rope import _precompute_rope_cache, apply_rotary_pos_emb
+from utils.output import CausalLMOutputWithPast
+
+
+# --- Base Configuration ---
+@dataclass
+class BaseConfig(ABC):
+    vocab_size: int = 65536
+    hidden_size: int = 1024
+    intermediate_size: int = 3072
+    num_hidden_layers: int = 28
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 8
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 1000000.0
+    max_position_embeddings: int = 4096
+    tie_word_embeddings: bool = True
+
+    # --- tinygrad specific flags ---
+    dtype: Any = dtypes.float32
+    quantize: Optional[str] = None
+    use_paged_attention: bool = False
+    use_flash_attention: bool = False # Note: flash_attention.py is experimental
+
+    # --- Paged Attention specific fields ---
+    page_size: int = 16
+    max_batch_size: int = 8
+    num_pages: int = 2048
+
+    @classmethod
+    @abstractmethod
+    def from_hf_config(cls, config_dict: dict) -> "BaseConfig":
+        """Creates a config instance from a Hugging Face config dictionary."""
+        raise NotImplementedError
+
+
+# --- Base Model Components ---
+
+class BaseAttention:
+    """
+    A standardized attention module supporting GQA, QK Norm, RoPE, and hooks for
+    paged and flash attention.
+    """
+    def __init__(self, config: BaseConfig, linear_class: Type = Linear):
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
+        self.q_proj = linear_class(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = linear_class(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        # Support for models with QK Norm (LFM2, Qwen3)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
+
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor] = None, seq_lens: Optional[List[int]] = None):
+        bsz, q_len, _ = hidden_states.shape
+        query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
+        key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        value_states = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        
+        query_states = self.q_norm(query_states).permute(0, 2, 1, 3)
+        key_states = self.k_norm(key_states).permute(0, 2, 1, 3)
+        value_states = value_states.permute(0, 2, 1, 3)
+
+        cos, sin = cos_sin
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if self.config.use_paged_attention:
+            paged_kv_cache = past_kv
+            input_pos = Tensor.arange(start_pos, start_pos + q_len).reshape(1, q_len).expand(bsz, q_len)
+            paged_kv_cache.update(batch_idx, input_pos, key_states.permute(0, 2, 1, 3), value_states.permute(0, 2, 1, 3))
+            
+            all_key_states, all_value_states = paged_kv_cache.gather_kv_for_attention(batch_idx, seq_lens)
+            all_key_states = all_key_states.permute(0, 2, 1, 3)
+            all_value_states = all_value_states.permute(0, 2, 1, 3)
+            present_kv = paged_kv_cache
+        else: # Standard KV Caching
+            past_key_value = past_kv
+            if past_key_value is not None:
+                key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
+                value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
+            all_key_states, all_value_states = key_states, value_states
+            present_kv = (key_states, value_states)
+
+        all_key_states = all_key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
+        all_value_states = all_value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
+
+        if self.config.use_flash_attention:
+            attn_output = flash_attn(query_states, all_key_states, all_value_states, sm_scale=1.0 / (self.head_dim**0.5), start_pos=start_pos)
+        else:
+            attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
+        
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.hidden_size)
+        return self.o_proj(attn_output), present_kv
+
+class BaseMLP:
+    """ Standardized SwiGLU MLP. """
+    def __init__(self, config: BaseConfig, linear_class: Type = Linear):
+        self.gate_proj = linear_class(config.hidden_size, config.intermediate_size, bias=False)
+        self.up_proj = linear_class(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = linear_class(config.intermediate_size, config.hidden_size, bias=False)
+    def __call__(self, x: Tensor) -> Tensor:
+        return self.down_proj(self.gate_proj(x).silu() * self.up_proj(x))
+
+
+class BaseModel(ABC):
+    """ The stack of decoder layers. """
+    def __init__(self, config: BaseConfig, linear_class: Type):
+        self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
+        self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        cos_cache, sin_cache = _precompute_rope_cache(dim=self.head_dim, max_seq_len=config.max_position_embeddings, base=config.rope_theta, dtype=config.dtype)
+        self.cos_cache = cos_cache
+        self.sin_cache = sin_cache
+
+    @abstractmethod
+    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
+        raise NotImplementedError
+
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int, output_hidden_states: bool, **kwargs):
+        h = self.embed_tokens(input_ids)
+        bsz, seq_len, _ = h.shape
+        all_hidden_states = (h,) if output_hidden_states else None
+        mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
+        
+        cos = self.cos_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, self.head_dim).expand(bsz, 1, seq_len, self.head_dim)
+        sin = self.sin_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, self.head_dim).expand(bsz, 1, seq_len, self.head_dim)
+        
+        new_states_list = []
+        for i, layer in enumerate(self.layers):
+            past_st = past_states[i] if past_states else None
+            h, new_st = layer(h, mask, past_st, (cos, sin), start_pos, **kwargs)
+            new_states_list.append(new_st)
+            if output_hidden_states: all_hidden_states += (h,)
+        
+        h = self.norm(h)
+        if output_hidden_states: all_hidden_states += (h,)
+        return h, new_states_list, all_hidden_states
+
+
+class BaseForCausalLM(ABC):
+    """ Top-level model class with generation and loading capabilities. """
+    def __init__(self, config: BaseConfig):
+        self.config = config
+        self.tokenizer = None
+        
+        if config.quantize == "nf4": self.linear_class = NF4Linear()
+        elif config.quantize == "int8": self.linear_class = Int8Linear()
+        else: self.linear_class = Linear
+
+        self.model = self._create_model(config, self.linear_class)
+        self.lm_head = Linear(config.hidden_size, config.vocab_size, bias=False)
+        if config.tie_word_embeddings: self.lm_head.weight = self.model.embed_tokens.weight
+
+        if config.use_paged_attention:
+            self.page_table = PageTable(n_pages=config.num_pages, page_size=config.page_size, max_batch_size=config.max_batch_size)
+            self.layer_caches = [PagedKVCache(page_table=self.page_table, num_heads=config.num_key_value_heads, head_dim=self.model.head_dim, dtype=config.dtype) for _ in range(config.num_hidden_layers)]
+
+    @abstractmethod
+    def _create_model(self, config: BaseConfig, linear_class: Type) -> BaseModel:
+        raise NotImplementedError
+
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]] = None, start_pos: int = 0, labels: Optional[Tensor] = None, output_hidden_states: bool = False, **kwargs) -> CausalLMOutputWithPast:
+        if self.config.use_paged_attention:
+            assert "batch_idx" in kwargs and "seq_lens" in kwargs, "Paged attention requires batch_idx and seq_lens"
+            _past_states = self.layer_caches
+        else:
+            _past_states = past_states
+
+        hidden_states, new_states, all_hidden_states = self.model(input_ids, _past_states, start_pos, output_hidden_states, **kwargs)
+        
+        if self.config.use_paged_attention:
+            # For paged attention, only attention layers use the cache object.
+            # Other layers (like LFM2's conv) might have state we need to update.
+            # This is handled by specific model implementations.
+            pass
+        
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            loss = logits[..., :-1, :].flatten(0, 1).sparse_categorical_crossentropy(labels[..., 1:].flatten(), ignore_index=-100)
+
+        return CausalLMOutputWithPast(
+            loss=loss, logits=logits,
+            past_key_values=new_states if not self.config.use_paged_attention else self.layer_caches,
+            hidden_states=all_hidden_states
+        )
+    
+    def _sample(self, logits: Tensor, do_sample: bool, temperature: float, min_p: float, repetition_penalty: float, generated_tokens: List[int]) -> int:
+        if repetition_penalty != 1.0 and generated_tokens:
+            unique_tokens = Tensor(list(set(generated_tokens)), dtype=dtypes.int32)
+            updates = Tensor.where(logits[unique_tokens] > 0, logits[unique_tokens] / repetition_penalty, logits[unique_tokens] * repetition_penalty)
+            logits = logits.scatter(0, unique_tokens, updates)
+        if not do_sample or temperature == 0: return logits.argmax().item()
+        if min_p > 0.0: raise NotImplementedError("Top-p (min_p) sampling is not yet supported in tinygrad.")
+        probs = (logits / temperature).softmax()
+        return (probs.cumsum() > Tensor.uniform(1).item()).argmax().item()
+    
+    def _decode_one_token(self, next_token_id: int):
+        print(self.tokenizer.decode([next_token_id]), end="", flush=True)
+
+    def generate(self, input_ids: Tensor, max_new_tokens: int, do_sample: bool = False, temperature: float = 1.0, min_p: float = 0.0, repetition_penalty: float = 1.0) -> Tensor:
+        assert self.tokenizer is not None, "Tokenizer must be attached to the model."
+        Tensor.training = False
+        tokens = input_ids[0].numpy().tolist()
+        
+        if self.config.use_paged_attention:
+            batch_idx_int = -1
+            try:
+                # self.reset_request_state() # model-specific resets if needed
+                batch_idx_int = self.page_table.allocate()
+                batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
+                self.page_table.reserve(batch_idx_int, len(tokens) + max_new_tokens)
+                outputs = self(Tensor([tokens]), start_pos=0, batch_idx=batch_idx_tensor, seq_lens=[len(tokens)])
+                start_pos = len(tokens)
+                
+                for _ in range(max_new_tokens):
+                    logits = outputs.logits[0, -1, :]
+                    next_token = self._sample(logits, do_sample, temperature, min_p, repetition_penalty, tokens)
+                    tokens.append(next_token)
+                    if next_token == self.tokenizer.eos_token_id: break
+                    self._decode_one_token(next_token)
+                    outputs = self(Tensor([[next_token]]), start_pos=start_pos, batch_idx=batch_idx_tensor, seq_lens=[start_pos + 1])
+                    start_pos += 1
+            finally:
+                if batch_idx_int != -1: self.page_table.erase(batch_idx_int)
+        else: # Standard generation
+            past_states = [None] * len(self.model.layers)
+            outputs = self(Tensor([tokens]), past_states, start_pos=0)
+            start_pos = len(tokens)
+            for _ in range(max_new_tokens):
+                past_states = outputs.past_key_values
+                logits = outputs.logits[0, -1, :]
+                next_token = self._sample(logits, do_sample, temperature, min_p, repetition_penalty, tokens)
+                tokens.append(next_token)
+                if next_token == self.tokenizer.eos_token_id: break
+                self._decode_one_token(next_token)
+                outputs = self(Tensor([[next_token]]), past_states, start_pos=start_pos)
+                start_pos += 1
+        return Tensor([tokens], dtype=dtypes.int32)
+    
+    @classmethod
+    @abstractmethod
+    def _from_hf_config(cls, model_id: str) -> BaseConfig:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _get_key_map(self) -> dict:
+        raise NotImplementedError
+    
+    @classmethod
+    def from_pretrained(cls, model_id: str, **kwargs):
+        print(f"--- Loading Model: {model_id} ---")
+        config = cls._from_hf_config(model_id)
+
+        torch_dtype_map = {"bfloat16": dtypes.bfloat16, "float16": dtypes.float16, "float32": dtypes.float32}
+        if "torch_dtype" in kwargs: config.dtype = torch_dtype_map.get(str(kwargs["torch_dtype"]).split('.')[-1], dtypes.float32)
+        if "quantize" in kwargs: config.quantize = kwargs["quantize"]
+        if "use_paged_attention" in kwargs: config.use_paged_attention = kwargs["use_paged_attention"]
+        if "use_flash_attention" in kwargs: config.use_flash_attention = kwargs["use_flash_attention"]
+
+        print("\nInitializing model architecture...")
+        model = cls(config)
+        
+        cls._load_from_hf(model, model_id)
+
+        print("\nLoading tokenizer...")
+        model.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        
+        for k in ["device_map", "attn_implementation"]:
+            if k in kwargs: print(f"  [Warning] tinygrad: Argument '{k}' is not used.")
+        return model
+
+    @classmethod
+    def _load_from_hf(cls, model, repo_id: str, filename: str = "model.safetensors"):
+        print(f"Fetching weights from {repo_id}/{filename}...")
+        local_path = hf_hub_download(repo_id=repo_id, filename=filename)
+        dtype = model.config.dtype
+        key_map = model._get_key_map()
+        
+        tg_state_dict = {}
+        print("Loading weights into memory...")
+        with safe_open(local_path, framework="pt", device="cpu") as f:
+            for hf_key, tg_key in key_map.items():
+                if hf_key in f.keys():
+                    tg_state_dict[tg_key] = Tensor(f.get_tensor(hf_key).to(torch.float32).numpy(), requires_grad=False)
+        
+        if model.config.quantize in ["nf4", "int8"]:
+            device = getattr(model.model.embed_tokens.weight, 'device', Device.DEFAULT)
+            tg_state_dict = model.linear_class.quantize(tg_state_dict, device=device)
+
+        for k in tg_state_dict:
+            if tg_state_dict[k].dtype != dtypes.uint8:
+                tg_state_dict[k] = tg_state_dict[k].cast(dtype)
+        
+        print("Assigning weights to model...")
+        load_state_dict(model, tg_state_dict, strict=False)
+        if model.config.tie_word_embeddings:
+            print("Re-tying word embeddings for lm_head...")
+            model.lm_head.weight = model.model.embed_tokens.weight
+        print("All weights loaded and assigned.")
