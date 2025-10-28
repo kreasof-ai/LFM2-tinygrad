@@ -10,6 +10,7 @@ from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 import torch  # only used for converting weights
 from transformers import AutoTokenizer
+from huggingface_hub.utils import EntryNotFoundError
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes, Device
@@ -305,18 +306,50 @@ class BaseForCausalLM(ABC):
 
     @classmethod
     def _load_from_hf(cls, model, repo_id: str, filename: str = "model.safetensors"):
-        print(f"Fetching weights from {repo_id}/{filename}...")
-        local_path = hf_hub_download(repo_id=repo_id, filename=filename)
+        print(f"Fetching weights from {repo_id}...")
         dtype = model.config.dtype
         key_map = model._get_key_map()
         
         tg_state_dict = {}
         print("Loading weights into memory...")
-        with safe_open(local_path, framework="pt", device="cpu") as f:
-            for hf_key, tg_key in key_map.items():
-                if hf_key in f.keys():
-                    tg_state_dict[tg_key] = Tensor(f.get_tensor(hf_key).to(torch.float32).numpy(), requires_grad=False)
-        
+
+        try:
+            # 1. Try to load sharded model index
+            index_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors.index.json")
+            with open(index_path) as f:
+                index_data = json.load(f)
+            weight_map = index_data["weight_map"]
+
+            # 2. Group keys by shard
+            shards = {}
+            for hf_key, shard_filename in weight_map.items():
+                if shard_filename not in shards:
+                    shards[shard_filename] = []
+                shards[shard_filename].append(hf_key)
+
+            # 3. Load from each shard
+            print(f"Model is sharded. Found {len(shards)} files.")
+            for shard_filename in sorted(shards.keys()):
+                hf_keys_in_shard = shards[shard_filename]
+                print(f"  Loading shard: {shard_filename}")
+                local_shard_path = hf_hub_download(repo_id=repo_id, filename=shard_filename)
+                with safe_open(local_shard_path, framework="pt", device="cpu") as f:
+                    for hf_key in hf_keys_in_shard:
+                        # Find the corresponding tinygrad key
+                        if hf_key in key_map:
+                            tg_key = key_map[hf_key]
+                            tg_state_dict[tg_key] = Tensor(f.get_tensor(hf_key).to(torch.float32).numpy(), requires_grad=False)
+
+        except (EntryNotFoundError, FileNotFoundError):
+            # 4. Fallback for non-sharded models
+            filename = "model.safetensors"
+            print(f"No model.safetensors.index.json found, falling back to single '{filename}' file.")
+            local_path = hf_hub_download(repo_id=repo_id, filename=filename)
+            with safe_open(local_path, framework="pt", device="cpu") as f:
+                for hf_key, tg_key in key_map.items():
+                    if hf_key in f.keys():
+                        tg_state_dict[tg_key] = Tensor(f.get_tensor(hf_key).to(torch.float32).numpy(), requires_grad=False)
+
         if model.config.quantize in ["nf4", "int8"]:
             device = getattr(model.model.embed_tokens.weight, 'device', Device.DEFAULT)
             tg_state_dict = model.linear_class.quantize(tg_state_dict, device=device)
