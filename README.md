@@ -33,11 +33,11 @@ Thanks to a flexible configuration loader, this implementation supports these mo
 
 ### Qwen2
 
-This implementation should be compatible with all dense Qwen2 models. It has been explicitly tested with the smallest variant.
+This implementation should be compatible with all dense Qwen2 models. We mark version with explicit testing.
 
 -   [`Qwen/Qwen2-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct) (Tested ✅)
--   [`Qwen/Qwen2-0.5B`](https://huggingface.co/Qwen/Qwen2-0.5B) (Untested)
--   [`Qwen/Qwen2-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) (Untested)
+-   [`Qwen/Qwen2-0.5B`](https://huggingface.co/Qwen/Qwen2-0.5B) (Tested ✅)
+-   [`Qwen/Qwen2-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) (Tested ✅)
 -   [`Qwen/Qwen2-1.5B`](https://huggingface.co/Qwen/Qwen2-1.5B) (Untested)
 -   [`Qwen/Qwen2-7B-Instruct`](https://huggingface.co/Qwen/Qwen2-7B-Instruct) (Untested)
 -   [`Qwen/Qwen2-7B`](https://huggingface.co/Qwen/Qwen2-7B) (Untested)
@@ -46,7 +46,7 @@ This implementation should be compatible with all dense Qwen2 models. It has bee
 
 ### Qwen2.5
 
-This implementation should be compatible with all dense Qwen2.5 models. It has been explicitly tested with the smallest variant.
+This implementation should be compatible with all dense Qwen2.5 models. We mark version with explicit testing.
 
 -   [`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) (Tested ✅)
 -   [`Qwen/Qwen2.5-0.5B`](https://huggingface.co/Qwen/Qwen2.5-0.5B) (Untested)
@@ -65,7 +65,7 @@ This implementation should be compatible with all dense Qwen2.5 models. It has b
 
 ### Qwen3
 
-This implementation should be compatible with all dense Qwen3 models. It has been explicitly tested with few variant.
+This implementation should be compatible with all dense Qwen3 models. We mark version with explicit testing.
 
 -   [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (Tested ✅)
 -   [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) (Tested ✅)
@@ -169,29 +169,7 @@ python src/train_sft.py \
 ## 🛠️ Implementation Notes
 
 ### Numerical Verification
-This implementation has been carefully verified against the official Hugging Face LFM2 model. The debugging scripts (`src/debug_prefilling.py` and `src/debug_decoding.py`) perform a layer-by-layer comparison of hidden states and cache values for both **standard and paged attention modes**, confirming that the tinygrad model produces numerically identical outputs.
-
-### Final Layer Norm (LFM2)
-Our analysis during debugging revealed a subtle but critical implementation detail in the official LFM2 model: the final `RMSNorm` layer is applied **inside the final decoder block**, right before the output is passed to the language model head. This repository's implementation correctly mirrors that structure. Applying the norm *after* the final block would lead to a numerical mismatch.
-
-The output below from `debug_prefilling.py` shows a perfect match across all layers and final logits, confirming the correctness of our model structure.
-
-```
---- Comparing: Layer 15 Output ---
-  Shapes: TG=(1, 4, 1024), PT=(1, 4, 1024)
-  Means:  TG=-0.005748, PT=-0.005748
-  Max absolute difference: 0.000732
-  ✅ MATCH: Tensors are numerically close.
--------------------------------------
---- Comparing: Final Logits ---
-  Shapes: TG=(1, 4, 65536), PT=(1, 4, 65536)
-  Means:  TG=-2.157017, PT=-2.157017
-  Max absolute difference: 0.000174
-  ✅ MATCH: Tensors are numerically close.
-----------------------------------
-
-🎉🎉🎉 All checks passed! The models match perfectly. 🎉🎉🎉
-```
+This implementation has been carefully verified against the official HuggingFace transformers implementation. The debugging scripts (`src/debug_prefilling.py` and `src/debug_decoding.py`) perform a layer-by-layer comparison of hidden states and cache values, confirming that the tinygrad model produces numerically identical outputs.
 
 ---
 

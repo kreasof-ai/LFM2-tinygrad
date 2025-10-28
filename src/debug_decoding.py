@@ -7,15 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
 # Use the new unified model loading
-from model.lfm2_modeling import LFM2ForCausalLM
-from model.qwen3_modeling import Qwen3ForCausalLM
-from model.qwen2_modeling import Qwen2ForCausalLM
-
-MODEL_MAP = {
-    "LFM2": LFM2ForCausalLM,
-    "Qwen3": Qwen3ForCausalLM,
-    "Qwen2": Qwen2ForCausalLM,
-}
+from model import MODEL_MAP
 
 # --- Comparison Helper ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):

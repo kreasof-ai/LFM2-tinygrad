@@ -29,6 +29,7 @@ from tinygrad.helpers import GlobalCounters
 
 from model.lfm2_modeling import LFM2ForCausalLM, BaseAttention, LFM2ConvOperator
 from model.qwen3_modeling import Qwen3ForCausalLM
+from model import MODEL_MAP
 from extra.lora import apply_lora_to_model, get_lora_parameters
 
 # --- Dataset and Preprocessing ---
@@ -117,11 +118,7 @@ def main(args):
     else:
         print("\n--- FP32 Training Enabled ---")
 
-    if args.model == "LFM2":
-        CausalLM = LFM2ForCausalLM
-    elif args.model == "Qwen3":
-        CausalLM = Qwen3ForCausalLM
-
+    CausalLM = MODEL_MAP[args.model]
     model = CausalLM.from_pretrained(
         args.model_id,
         torch_dtype="float16" if args.use_fp16 else "float32",
@@ -216,7 +213,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
     # Model and Data
-    parser.add_argument("--model", type=str, default="LFM2", choices=["LFM2", "Qwen3"], help="Supported model choice.")
+    parser.add_argument("--model", type=str, default="LFM2", choices=MODEL_MAP.keys(), help="Supported model choice.")
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     parser.add_argument("--dataset_id", type=str, default="mlabonne/FineTome-100k", help="Hugging Face dataset ID for SFT")
     # Training Hyperparameters
