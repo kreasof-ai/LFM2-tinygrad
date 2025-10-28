@@ -5,7 +5,7 @@
 	</picture>
 </p>
 <h3 align="center">
-A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by <a href="https://github.com/tinygrad/tinygrad">tinygrad</a>.
+A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by <a href="https://github.com/tinygrad/tinygrad">tinygrad</a>
 </h3>
 
 ---
