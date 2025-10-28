@@ -1,7 +1,7 @@
 <p align="center">
 	<picture>
 		<source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d">
-		<img alt="openformer-logo" src="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d" width=60%>
+		<img alt="openformer-logo" src="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d" width=50%>
 	</picture>
 </p>
 <h3 align="center">
