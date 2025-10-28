@@ -37,7 +37,7 @@ This implementation should be compatible with all dense Qwen3 models. It has bee
 
 -   [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (Tested ✅)
 -   [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) (Tested ✅)
--   [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) (Untested)
+-   [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) (Tested ✅)
 -   [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) (Untested)
 -   [`Qwen/Qwen3-14B`](https://huggingface.co/Qwen/Qwen3-14B) (Untested)
 -   [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) (Untested)
