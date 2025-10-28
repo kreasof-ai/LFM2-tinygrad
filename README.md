@@ -8,10 +8,6 @@
 A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by <a href="https://github.com/tinygrad/tinygrad">tinygrad</a>.
 </h3>
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/apache-2-0)
-
----
-
 The deep learning ecosystem is heavily dominated by a few major players and proprietary hardware vendors, making it difficult for developers and researchers to innovate on non-NVIDIA GPUs. **OpenFormer** is an open-source initiative by **[Kreasof AI](https://kreasof.my.id)** to democratize access to large language models.
 
 Built on a unified, extensible architecture, OpenFormer liberates you to train, fine-tune, and run state-of-the-art transformer models on a wide range of hardware, including mainstream GPU from **AMD, Intel, and Apple Silicon GPUs**, by leveraging the power and simplicity of tinygrad.
