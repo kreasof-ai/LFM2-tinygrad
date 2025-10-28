@@ -31,17 +31,6 @@ Thanks to a flexible configuration loader, this implementation supports these mo
 -   [`LiquidAI/LFM2-1.2B`](https://huggingface.co/LiquidAI/LFM2-1.2B)
 -   [`LiquidAI/LFM2-2.6B`](https://huggingface.co/LiquidAI/LFM2-2.6B)
 
-### Qwen3
-
-This implementation should be compatible with all dense Qwen3 models. It has been explicitly tested with few variant.
-
--   [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (Tested ✅)
--   [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) (Tested ✅)
--   [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) (Tested ✅)
--   [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) (Untested)
--   [`Qwen/Qwen3-14B`](https://huggingface.co/Qwen/Qwen3-14B) (Untested)
--   [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) (Untested)
-
 ### Qwen2
 
 This implementation should be compatible with all dense Qwen2 models. It has been explicitly tested with the smallest variant.
@@ -54,6 +43,36 @@ This implementation should be compatible with all dense Qwen2 models. It has bee
 -   [`Qwen/Qwen2-7B`](https://huggingface.co/Qwen/Qwen2-7B) (Untested)
 -   [`Qwen/Qwen2-72B-Instruct`](https://huggingface.co/Qwen/Qwen2-7B-Instruct) (Untested)
 -   [`Qwen/Qwen2-72B`](https://huggingface.co/Qwen/Qwen2-7B) (Untested)
+
+### Qwen2.5
+
+This implementation should be compatible with all dense Qwen2.5 models. It has been explicitly tested with the smallest variant.
+
+-   [`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) (Tested ✅)
+-   [`Qwen/Qwen2.5-0.5B`](https://huggingface.co/Qwen/Qwen2.5-0.5B) (Untested)
+-   [`Qwen/Qwen2.5-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-1.5B`](https://huggingface.co/Qwen/Qwen2.5-1.5B) (Untested)
+-   [`Qwen/Qwen2.5-3B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-3B`](https://huggingface.co/Qwen/Qwen2.5-3B) (Untested)
+-   [`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-7B`](https://huggingface.co/Qwen/Qwen2.5-7B) (Untested)
+-   [`Qwen/Qwen2.5-14B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-14B`](https://huggingface.co/Qwen/Qwen2.5-14B) (Untested)
+-   [`Qwen/Qwen2.5-32B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-32B`](https://huggingface.co/Qwen/Qwen2.5-32B) (Untested)
+-   [`Qwen/Qwen2.5-72B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) (Untested)
+-   [`Qwen/Qwen2.5-72B`](https://huggingface.co/Qwen/Qwen2.5-7B) (Untested)
+
+### Qwen3
+
+This implementation should be compatible with all dense Qwen3 models. It has been explicitly tested with few variant.
+
+-   [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (Tested ✅)
+-   [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) (Tested ✅)
+-   [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) (Tested ✅)
+-   [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) (Untested)
+-   [`Qwen/Qwen3-14B`](https://huggingface.co/Qwen/Qwen3-14B) (Untested)
+-   [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) (Untested)
 
 ---
 
