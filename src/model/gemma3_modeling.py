@@ -32,6 +32,13 @@ class Gemma3Config(BaseConfig):
 
     @classmethod
     def from_hf_config(cls, config_dict: dict) -> "Gemma3Config":
+        if config_dict.get("layer_types", False):
+            layer_types = config_dict["layer_types"]
+        else:
+            layer_types = [
+                "sliding_attention" if bool((i + 1) % config_dict["sliding_window_pattern"]) else "full_attention"
+                for i in range(config_dict["num_hidden_layers"])
+            ]
         return cls(
             vocab_size=config_dict["vocab_size"],
             hidden_size=config_dict["hidden_size"],
@@ -46,7 +53,7 @@ class Gemma3Config(BaseConfig):
             tie_word_embeddings=config_dict.get("tie_word_embeddings", True),
             # Gemma 3 specific
             query_pre_attn_scalar=config_dict["query_pre_attn_scalar"],
-            layer_types=config_dict["layer_types"],
+            layer_types=layer_types,
             sliding_window=config_dict.get("sliding_window"),
             rope_local_base_freq=config_dict.get("rope_local_base_freq", 10000.0)
         )

@@ -78,8 +78,8 @@ This implementation should be compatible with all dense Qwen3 models. We mark ve
 
 This implementation supports text-only Gemma 3 models.
 
--   [`google/gemma-3-270m`](https://huggingface.co/google/gemma-3-270m) (Tested ✅)
--   [`google/gemma-3-1b`](https://huggingface.co/google/gemma-3-1b) (Untested)
+-   [`google/gemma-3-270m-it`](https://huggingface.co/google/gemma-3-270m-it) (Tested ✅)
+-   [`google/gemma-3-1b-it`](https://huggingface.co/google/gemma-3-1b-it) (Tested ✅)
 
 ---
 
