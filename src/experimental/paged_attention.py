@@ -78,7 +78,6 @@ class PageTable:
 
         newly_allocated_pages = [self.free_pages.pop() for _ in range(pages_to_allocate)]
         
-        # *** FIX START ***
         # To update specific (row, col) coordinates, we flatten the tensor, calculate
         # the 1D indices, and then scatter along dim=0 of the flattened tensor.
         num_cols = self.page_table.shape[1]
@@ -91,7 +90,6 @@ class PageTable:
         # Update the CPU copy
         for i, page_idx in enumerate(newly_allocated_pages):
             self.page_table_cpu[batch_idx][current_pages + i] = page_idx
-        # *** FIX END ***
 
         self.capacity[batch_idx] = num_logical_blocks_needed * self.page_size
         return True
@@ -104,7 +102,6 @@ class PageTable:
             if page != -1:
                 self.free_pages.append(page)
         
-        # *** FIX START ***
         # Use the same flatten-scatter-reshape pattern to reset values to -1.
         num_cols = self.page_table.shape[1]
         flat_indices = Tensor([batch_idx * num_cols + i for i in range(num_logical_blocks)], dtype=dtypes.int32)
@@ -116,7 +113,6 @@ class PageTable:
         # Reset the CPU copy
         for i in range(num_logical_blocks):
             self.page_table_cpu[batch_idx][i] = -1
-        # *** FIX END ***
 
         self.free_batch_idx.append(batch_idx)
         self.capacity[batch_idx] = 0
@@ -142,9 +138,6 @@ class PageTable:
         physical_block_idx = page_table_flat.gather(0, flat_indices.flatten()).reshape(positions.shape)
         
         return (physical_block_idx * self.page_size + logical_block_offset).cast(dtypes.int32)
-
-# The rest of the file (PagedKVCache) remains unchanged as it uses get_physical_addrs,
-# which we have now corrected. I'll include it for completeness.
 
 class PagedKVCache:
     """
@@ -182,11 +175,9 @@ class PagedKVCache:
         
         scatter_indices = addrs.reshape(1, 1, -1, 1).expand(1, H, B * S, D)
 
-        # *** FIX START ***
         # Correct the argument order: scatter(dim, index, src)
         self.k_cache = self.k_cache.scatter(2, scatter_indices, k_val).realize()
         self.v_cache = self.v_cache.scatter(2, scatter_indices, v_val).realize()
-        # *** FIX END ***
 
     # In /paged_attention.py -> class PagedKVCache
 
@@ -207,10 +198,8 @@ class PagedKVCache:
         addrs = self.page_table.get_physical_addrs(batch_indices, positions).flatten()
         gather_indices = addrs.reshape(1, 1, -1, 1).expand(1, self.num_heads, -1, self.head_dim)
         
-        # *** FIX START ***
         # Correct the argument order: gather(dim, index)
         gathered_k = self.k_cache.gather(2, gather_indices).reshape(B, self.num_heads, max_seq_len, self.head_dim).permute(0, 2, 1, 3)
         gathered_v = self.v_cache.gather(2, gather_indices).reshape(B, self.num_heads, max_seq_len, self.head_dim).permute(0, 2, 1, 3)
-        # *** FIX END ***
 
         return gathered_k, gathered_v

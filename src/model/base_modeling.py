@@ -77,7 +77,7 @@ class BaseAttention:
         self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = linear_class(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        # Support for models with QK Norm (LFM2, Qwen3)
+        # Support for models with QK Norm
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
 
