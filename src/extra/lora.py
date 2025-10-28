@@ -14,6 +14,8 @@ class LoRALinear:
     def __init__(self, linear_layer: Linear, r: int, lora_alpha: int):
         self.linear = linear_layer
         self.linear.weight.requires_grad = False
+        if hasattr(self.linear, 'bias') and self.linear.bias is not None:
+            self.linear.bias.requires_grad = False
         out_features, in_features = self.linear.weight.shape
         self.lora_A = Tensor.kaiming_uniform(in_features, r, requires_grad=True)
         self.lora_B = Tensor.zeros(r, out_features, requires_grad=True)

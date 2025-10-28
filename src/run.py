@@ -2,6 +2,7 @@
 
 import argparse
 from model.lfm2_modeling import LFM2ForCausalLM
+from model.qwen2_modeling import Qwen2ForCausalLM
 from model.qwen3_modeling import Qwen3ForCausalLM
 
 # tinygrad imports
@@ -19,7 +20,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LFM2 inference in tinygrad.")
     parser.add_argument("--use_fp16", action="store_true", help="Enable FP16 training for lower memory usage")
     parser.add_argument("--quantize", type=str, default=None, choices=["nf4", "int8"], help="Enable NF4 or INT8 quantization for the model.")
-    parser.add_argument("--model", type=str, default="LFM2", choices=["LFM2", "Qwen3"], help="Supported model choice.")
+    parser.add_argument("--model", type=str, default="LFM2", choices=["LFM2", "Qwen3", "Qwen2"], help="Supported model choice.")
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     args = parser.parse_args()
     
@@ -30,6 +31,8 @@ if __name__ == "__main__":
         CausalLM = LFM2ForCausalLM
     elif args.model == "Qwen3":
         CausalLM = Qwen3ForCausalLM
+    elif args.model == "Qwen2":
+          CausalLM = Qwen2ForCausalLM
 
     model = CausalLM.from_pretrained(
         args.model_id,

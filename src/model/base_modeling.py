@@ -39,6 +39,7 @@ class BaseConfig(ABC):
     rope_theta: float = 1000000.0
     max_position_embeddings: int = 4096
     tie_word_embeddings: bool = True
+    attention_bias: bool = False
 
     # --- tinygrad specific flags ---
     dtype: Any = dtypes.float32
@@ -73,14 +74,14 @@ class BaseAttention:
         self.head_dim = config.head_dim
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
-        self.q_proj = linear_class(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
-        self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.q_proj = linear_class(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = linear_class(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
         # Support for models with QK Norm
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if hasattr(config, "qk_norm") else lambda x: x
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if getattr(config, "qk_norm") else lambda x: x
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if getattr(config, "qk_norm") else lambda x: x
 
     def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor] = None, seq_lens: Optional[List[int]] = None):
         bsz, q_len, _ = hidden_states.shape
@@ -163,9 +164,9 @@ class BaseModel(ABC):
             past_st = past_states[i] if past_states else None
             h, new_st = layer(h, mask, past_st, (cos, sin), start_pos, **kwargs)
             new_states_list.append(new_st)
+            if i + 1 == len(self.layers): h = self.norm(h)
             if output_hidden_states: all_hidden_states += (h,)
-        
-        h = self.norm(h)
+
         if output_hidden_states: all_hidden_states += (h,)
         return h, new_states_list, all_hidden_states
 

@@ -33,7 +33,7 @@ Thanks to a flexible configuration loader, this implementation supports these mo
 
 ### Qwen3
 
-This implementation should be compatible with all dense Qwen3 models. It has been explicitly tested with the smallest variant.
+This implementation should be compatible with all dense Qwen3 models. It has been explicitly tested with few variant.
 
 -   [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (Tested ✅)
 -   [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) (Tested ✅)
@@ -41,6 +41,19 @@ This implementation should be compatible with all dense Qwen3 models. It has bee
 -   [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) (Untested)
 -   [`Qwen/Qwen3-14B`](https://huggingface.co/Qwen/Qwen3-14B) (Untested)
 -   [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) (Untested)
+
+### Qwen2
+
+This implementation should be compatible with all dense Qwen2 models. It has been explicitly tested with the smallest variant.
+
+-   [`Qwen/Qwen2-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct) (Tested ✅)
+-   [`Qwen/Qwen2-0.5B`](https://huggingface.co/Qwen/Qwen2-0.5B) (Untested)
+-   [`Qwen/Qwen2-1.5B-Instruct`](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) (Untested)
+-   [`Qwen/Qwen2-1.5B`](https://huggingface.co/Qwen/Qwen2-1.5B) (Untested)
+-   [`Qwen/Qwen2-7B-Instruct`](https://huggingface.co/Qwen/Qwen2-7B-Instruct) (Untested)
+-   [`Qwen/Qwen2-7B`](https://huggingface.co/Qwen/Qwen2-7B) (Untested)
+-   [`Qwen/Qwen2-72B-Instruct`](https://huggingface.co/Qwen/Qwen2-7B-Instruct) (Untested)
+-   [`Qwen/Qwen2-72B`](https://huggingface.co/Qwen/Qwen2-7B) (Untested)
 
 ---
 

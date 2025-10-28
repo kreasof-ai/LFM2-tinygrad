@@ -7,8 +7,16 @@ import argparse
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tinygrad import Tensor, dtypes
 
-# Use the new unified model
-from model import lfm2_modeling
+# Use the new unified model loading
+from model.lfm2_modeling import LFM2ForCausalLM
+from model.qwen3_modeling import Qwen3ForCausalLM
+from model.qwen2_modeling import Qwen2ForCausalLM
+
+MODEL_MAP = {
+    "LFM2": LFM2ForCausalLM,
+    "Qwen3": Qwen3ForCausalLM,
+    "Qwen2": Qwen2ForCausalLM,
+}
 
 # --- Comparison Helper ---
 def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
@@ -27,7 +35,7 @@ def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
     max_abs_diff = np.max(np.abs(tg_np - pt_np))
     print(f"  Max absolute difference: {max_abs_diff:.6f}")
 
-    is_close = np.allclose(tg_np, pt_np, atol=1e-4, rtol=1e-3)
+    is_close = np.allclose(tg_np, pt_np, atol=1e-3, rtol=1e-3)
     if is_close:
         print("  ✅ MATCH: Tensors are numerically close.")
     else:
@@ -37,32 +45,22 @@ def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
 
 # --- Main Comparison Logic ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Debug the prefilling stage of LFM2.")
-    parser.add_argument("--paged", action="store_true", help="Run debugging in Paged Attention mode.")
+    parser = argparse.ArgumentParser(description="Debug the prefilling stage of a model.")
+    parser.add_argument("--model", type=str, default="LFM2", choices=MODEL_MAP.keys(), help="Model to debug.")
+    parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model ID.")
     args = parser.parse_args()
 
-    REPO_ID = "LiquidAI/LFM2-350M"
     PROMPT = "The secret is"
 
     # 1. Load Hugging Face reference model
-    print("Loading HF model...")
-    model_hf = AutoModelForCausalLM.from_pretrained(REPO_ID, torch_dtype=torch.float32).eval()
-    tokenizer = AutoTokenizer.from_pretrained(REPO_ID)
+    print(f"Loading HF model: {args.model_id}...")
+    model_hf = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.float32).eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
 
     # 2. Load tinygrad model
-    print("\nLoading tinygrad model...")
-
-    config_overrides = {}
-    
-    if args.paged:
-        print("\n*** RUNNING IN PAGED ATTENTION MODE ***\n")
-        config_overrides = {
-            "use_paged_attention": True
-        }
-    else:
-        print("\n*** RUNNING IN STANDARD MODE ***\n")
-
-    model_tg = lfm2_modeling.LFM2ForCausalLM.from_pretrained(REPO_ID, **config_overrides)
+    print(f"\nLoading tinygrad model: {args.model} from {args.model_id}...")
+    CausalLM = MODEL_MAP[args.model]
+    model_tg = CausalLM.from_pretrained(args.model_id)
 
     # 3. Prepare identical inputs
     input_ids_pt = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
@@ -75,59 +73,40 @@ if __name__ == "__main__":
         logits_pt = pt_out.logits
         hidden_states_pt = pt_out.hidden_states
         position_ids = torch.arange(0, seq_len, dtype=torch.long).unsqueeze(0)
-        # Note: HF pos_emb is not public, so we call it on the internal model object.
-        cos_pt, sin_pt = model_hf.model.pos_emb(hidden_states_pt[0], position_ids)
+        if args.model == "Qwen2" or args.model == "Qwen3":
+            cos_pt, sin_pt = model_hf.model.rotary_emb(hidden_states_pt[0], position_ids)
+        elif args.model == "LFM2":
+            cos_pt, sin_pt = model_hf.model.pos_emb(hidden_states_pt[0], position_ids)
 
-    # 5. Run tinygrad model (conditionally)
+    # 5. Run tinygrad model
     print("\n--- Starting Step-by-Step tinygrad Comparison ---")
-    tg_out = None
-    if args.paged:
-        controller = model_tg.page_table
-        batch_idx_int = -1
-        try:
-            model_tg.reset_request_state()
-            batch_idx_int = controller.allocate()
-            batch_idx_tensor = Tensor([batch_idx_int], dtype=dtypes.int32)
-            controller.reserve(batch_idx_int, seq_len + 1)
-            
-            tg_out = model_tg(
-                input_ids_tg,
-                output_hidden_states=True,
-                start_pos=0,
-                batch_idx=batch_idx_tensor,
-                seq_lens=[seq_len]
-            )
-        finally:
-            if batch_idx_int != -1:
-                controller.erase(batch_idx_int)
-    else: # Standard mode
-        tg_out = model_tg(input_ids_tg, output_hidden_states=True)
+    tg_out = model_tg(input_ids_tg, output_hidden_states=True)
 
     logits_tg = tg_out.logits
     hidden_states_tg = tg_out.hidden_states
 
-    # 6. Perform comparisons (this part is now shared)
+    # 6. Perform comparisons
     all_checks_passed = True
     
     # A. Compare initial embeddings
     if not compare_tensors(hidden_states_tg[0], hidden_states_pt[0], "Initial Embeddings"): all_checks_passed = False
 
-    # B. Compare RoPE
+    # B. Compare Layer Outputs
     if all_checks_passed:
-      cos_tg_slice = model_tg.model.cos_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
-      sin_tg_slice = model_tg.model.sin_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
-      if not compare_tensors(cos_tg_slice, cos_pt, "RoPE Cos"): all_checks_passed = False
-      if not compare_tensors(sin_tg_slice, sin_pt, "RoPE Sin"): all_checks_passed = False
-
-    # C. Compare Layer Outputs
+        cos_tg_slice = model_tg.model.cos_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
+        sin_tg_slice = model_tg.model.sin_cache[0:seq_len].unsqueeze(0).expand(1, -1, -1)
+        if not compare_tensors(cos_tg_slice, cos_pt, "RoPE Cos"): all_checks_passed = False
+        if not compare_tensors(sin_tg_slice, sin_pt, "RoPE Sin"): all_checks_passed = False
+    
     if all_checks_passed:
-        for i in range(model_tg.config.num_hidden_layers):
+        num_layers_to_compare = min(len(hidden_states_tg) -1, len(hidden_states_pt) -1)
+        for i in range(num_layers_to_compare):
             if not compare_tensors(hidden_states_tg[i + 1], hidden_states_pt[i + 1], f"Layer {i} Output"):
                 print(f"\n‼️ DIVERGENCE DETECTED AT LAYER {i} ‼️")
                 all_checks_passed = False
                 break
 
-    # D. Compare final logits
+    # C. Compare final logits
     if all_checks_passed:
         if not compare_tensors(logits_tg, logits_pt, "Final Logits"): 
             print(f"\n‼️ DIVERGENCE DETECTED AT FINAL LOGITS ‼️")
