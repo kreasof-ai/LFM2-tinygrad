@@ -9,6 +9,7 @@ from tinygrad.nn.state import get_parameters
 from model.base_modeling import BaseForCausalLM, BaseAttention
 from model.lfm2_modeling import LFM2ForCausalLM # for type hint
 from model.qwen3_modeling import Qwen3ForCausalLM # for type hint
+from model.gemma3_modeling import Gemma3Attention
 
 class LoRALinear:
     def __init__(self, linear_layer: Linear, r: int, lora_alpha: int):
@@ -30,7 +31,7 @@ def apply_lora_to_model(model: BaseForCausalLM, r: int, alpha: int, target_modul
 
     for layer in model.model.layers:
         # Standard path for models like Qwen3
-        if hasattr(layer, "self_attn") and isinstance(layer.self_attn, BaseAttention):
+        if hasattr(layer, "self_attn") and isinstance(layer.self_attn, BaseAttention|Gemma3Attention):
             attention_module = layer.self_attn
         # LFM2 specific path
         elif hasattr(layer, "operator") and isinstance(layer.operator, BaseAttention):
