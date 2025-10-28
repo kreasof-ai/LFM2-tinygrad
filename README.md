@@ -1,6 +1,12 @@
-# OpenFormer
-
-**A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by [tinygrad](https://github.com/tinygrad/tinygrad).**
+<p align="center">
+	<picture>
+		<source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d">
+		<img alt="openformer-logo" src="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d" width=60%>
+	</picture>
+</p>
+<h3 align="center">
+A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by <a href="https://github.com/tinygrad/tinygrad">tinygrad</a>.
+</h3>
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/apache-2-0)
 
