@@ -95,9 +95,9 @@ On an **AMD RX 6700 XT**, a short LFM2 LoRA fine-tuning run (`max_length=512`, `
 
 ## 🚀 Getting Started
 
-<a href="https://www.kaggle.com/code/akbar2habibullah/openformer-kaggle" target="_blank">
-<img src="https://kaggle.com/static/images/open-in-kaggle.svg" alt="Open in Kaggle" />
-</a>
+| Notebook | Link |
+|----------|------|
+| Kaggle   | <a href="https://www.kaggle.com/code/akbar2habibullah/openformer-kaggle" target="_blank"><img src="https://kaggle.com/static/images/open-in-kaggle.svg" alt="Open in Kaggle" /></a> |
 
 > Note: The Kaggle notebook provides a ready-to-use T4 GPU environment. Google Colab is not supported at this time due to driver issues.
 
