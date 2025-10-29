@@ -1,25 +1,29 @@
 # src/model/base_modeling.py
 
 import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, List, Optional, Tuple, Type
 
 # Third-party imports
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, create_repo, hf_hub_download, snapshot_download
 from safetensors import safe_open
-import torch  # only used for converting weights
+from safetensors.torch import save_file as safe_save_file
+import torch  # used for converting weights and saving
 from transformers import AutoTokenizer
 from huggingface_hub.utils import EntryNotFoundError
 
 # tinygrad imports
 from tinygrad import Tensor, dtypes, Device
 from tinygrad.nn import Embedding, Linear, RMSNorm
-from tinygrad.nn.state import load_state_dict, get_parameters
+from tinygrad.nn.state import load_state_dict, get_parameters, get_state_dict
 
 # Project imports for shared components
 from experimental.paged_attention import PagedKVCache, PageTable
 from experimental.flash_attention import flash_attn
+from extra.lora import LoRALinear
 from extra.quantization import NF4Linear, Int8Linear
 from utils.rope import _precompute_rope_cache, apply_rotary_pos_emb
 from utils.output import CausalLMOutputWithPast
@@ -176,6 +180,7 @@ class BaseForCausalLM(ABC):
     def __init__(self, config: BaseConfig):
         self.config = config
         self.tokenizer = None
+        self.source_model_id = None
         
         if config.quantize == "nf4": self.linear_class = NF4Linear()
         elif config.quantize == "int8": self.linear_class = Int8Linear()
@@ -295,6 +300,7 @@ class BaseForCausalLM(ABC):
 
         print("\nInitializing model architecture...")
         model = cls(config)
+        model.source_model_id = model_id # Store the original repo ID
         
         cls._load_from_hf(model, model_id)
 
@@ -365,3 +371,105 @@ class BaseForCausalLM(ABC):
             print("Re-tying word embeddings for lm_head...")
             model.lm_head.weight = model.model.embed_tokens.weight
         print("All weights loaded and assigned.")
+
+    def save_pretrained(self, save_directory: str, repo_id: Optional[str] = None):
+        """
+        Saves the model weights to a local directory and optionally uploads to the Hugging Face Hub.
+        LoRA weights are automatically fused into the base model weights.
+        Non-weight files (config, tokenizer, etc.) are copied from the original source repository.
+
+        Args:
+            save_directory (str): The directory to save the model artifacts.
+            repo_id (Optional[str]): The Hugging Face Hub repository ID to upload to (e.g., "your-username/your-model-name").
+                                     If provided, the repository will be created if it doesn't exist.
+        """
+        assert self.source_model_id is not None, "Cannot save model without a source_model_id. Please load with from_pretrained."
+        print(f"--- Saving model to {save_directory} ---")
+        
+        Path(save_directory).mkdir(parents=True, exist_ok=True)
+
+        hf_state_dict = {}
+        inverse_key_map = {v: k for k, v in self._get_key_map().items()}
+        processed_tg_keys = set()
+        
+        def get_named_modules(module, prefix=""):
+            modules = {prefix: module}
+            if not hasattr(module, '__dict__'): return modules
+            for name, sub_module in module.__dict__.items():
+                if isinstance(sub_module, list):
+                    for i, m in enumerate(sub_module):
+                        if hasattr(m, '__dict__'):
+                            modules.update(get_named_modules(m, prefix=f"{prefix}.{name}.{i}" if prefix else f"{name}.{i}"))
+                elif hasattr(sub_module, '__dict__') and not isinstance(sub_module, (Tensor, PageTable, PagedKVCache, BaseConfig)):
+                     modules.update(get_named_modules(sub_module, prefix=f"{prefix}.{name}" if prefix else name))
+            return modules
+        
+        all_modules = get_named_modules(self)
+
+        print("Processing model weights for saving...")
+        for path, module in all_modules.items():
+            if isinstance(module, LoRALinear):
+                print(f"  Fusing LoRA weights for: {path}")
+                merged_weight = module.merge_weights()
+                
+                tg_key = f"{path}.weight" # The key of the original weight tensor
+                if tg_key in inverse_key_map:
+                    hf_key = inverse_key_map[tg_key]
+                    hf_state_dict[hf_key] = torch.from_numpy(merged_weight.numpy())
+                    
+                    # Mark all related tensors as processed to avoid saving them separately
+                    processed_tg_keys.add(tg_key)
+                    processed_tg_keys.add(f"{path}.lora_A")
+                    processed_tg_keys.add(f"{path}.lora_B")
+                    if hasattr(module.linear, 'scale'):
+                        processed_tg_keys.add(f"{path}.scale")
+            
+            elif isinstance(module, (self.linear_class,)): # Catch non-LoRA quantized layers
+                if hasattr(module, 'dequantize'):
+                    print(f"  Dequantizing layer: {path}")
+                    dequant_weight = module.dequantize().realize()
+                    
+                    tg_key = f"{path}.weight"
+                    if tg_key in inverse_key_map:
+                        hf_key = inverse_key_map[tg_key]
+                        hf_state_dict[hf_key] = torch.from_numpy(dequant_weight.numpy())
+                        processed_tg_keys.add(tg_key)
+                        processed_tg_keys.add(f"{path}.scale")
+
+        # Handle all other tensors (embeddings, norms, non-quantized linear, etc.)
+        full_state_dict = get_state_dict(self)
+        for tg_key, tensor in full_state_dict.items():
+            if tg_key in processed_tg_keys: continue
+            if tg_key in inverse_key_map:
+                hf_key = inverse_key_map[tg_key]
+                hf_state_dict[hf_key] = torch.from_numpy(tensor.numpy())
+        
+        weights_path = os.path.join(save_directory, "model.safetensors")
+        safe_save_file(hf_state_dict, weights_path, metadata={"format": "pt"})
+        print(f"  Weights saved to {weights_path}")
+
+        print(f"  Copying non-weight files from {self.source_model_id}...")
+        snapshot_download(
+            repo_id=self.source_model_id,
+            local_dir=save_directory,
+            allow_patterns=["*"],
+            ignore_patterns=["*.safetensors", "*.bin*", "*.pth"],
+            local_dir_use_symlinks=False,
+        )
+        print("  Copied configuration and tokenizer files.")
+
+        if repo_id:
+            print(f"--- Uploading model to Hugging Face Hub: {repo_id} ---")
+            print("  (Ensure you have run 'huggingface-cli login' first)")
+            
+            # Create the repository if it doesn't exist
+            create_repo(repo_id, repo_type="model", exist_ok=True)
+            print(f"  Repository '{repo_id}' ensured to exist.")
+            
+            api = HfApi()
+            api.upload_folder(
+                folder_path=save_directory,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            print("  Upload complete!")

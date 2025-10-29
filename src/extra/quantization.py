@@ -18,6 +18,14 @@ def Int8Linear():
       # self.weight.T is (in, out). Scale broadcasts to columns of .T
       return x.dot(self.weight.cast(self.scale.dtype).T * self.scale)
 
+    def dequantize(self) -> Tensor:
+      """ Returns the dequantized weight tensor in its original float format. """
+      # self.weight is (out, in), self.scale is (out,)
+      # To get the original (out, in) weight matrix, we need to transpose the
+      # (in, out) dequantized matrix used in the dot product.
+      dequantized_for_dot = self.weight.cast(self.scale.dtype).T * self.scale
+      return dequantized_for_dot.T
+
     @staticmethod
     def quantize(state_dict: dict[str, Tensor], device, scale_dtype=dtypes.float16) -> dict[str, Tensor]:
         """ Quantizes a state dictionary of FP32/FP16 weights into INT8 format. """
@@ -61,7 +69,8 @@ def NF4Linear(block_size=64):
       # One scale value per block.
       self.scale = Tensor.empty(int(out_features * in_features / block_size), 1, dtype=dtypes.float16)
 
-    def __call__(self, x: Tensor) -> Tensor:
+    def dequantize(self) -> Tensor:
+      """ Returns the dequantized weight tensor in its original float format. """
       # 1. Unpack 4-bit weights from the uint8 tensor.
       high_nibble = self.weight.cast(dtypes.uint8) >> 4
       low_nibble = self.weight.cast(dtypes.uint8) & 0x0F
@@ -71,8 +80,11 @@ def NF4Linear(block_size=64):
       
       # 3. Dequantize: Look up values and apply scaling.
       dequantized_weight = (CODE[unpacked_indices].reshape(-1, block_size) * self.scale).reshape(self.out_features, self.in_features)
-      
-      # 4. Perform the linear operation.
+      return dequantized_weight
+
+    def __call__(self, x: Tensor) -> Tensor:
+      # Dequantize on-the-fly for the linear operation.
+      dequantized_weight = self.dequantize()
       return x.linear(dequantized_weight.T)
 
     @staticmethod

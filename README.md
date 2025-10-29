@@ -159,6 +159,29 @@ python src/train_sft.py \
 
 ---
 
+## 💾 Saving & Uploading Fine-Tuned Models
+
+After fine-tuning, you can easily save your model and upload it to the Hugging Face Hub. The `save_pretrained` method handles dequantization, weight name mapping, and copies all necessary configuration files from the original repository.
+
+Here's how to save a fine-tuned model and push it to the Hub:
+
+```python
+# Assuming 'model' is your fine-tuned OpenFormer model instance
+# from train_sft.py or loaded otherwise.
+
+# 1. Save locally
+model.save_pretrained("./my-finetuned-lfm2")
+
+# 2. Save locally AND upload to the Hub
+# Make sure you are logged in via `huggingface-cli login`
+# model.save_pretrained(
+#     save_directory="./my-finetuned-lfm2-hub",
+#     repo_id="your-username/my-finetuned-lfm2"
+# )
+```
+
+---
+
 ## 🗺️ Roadmap
 
 Our vision is to evolve OpenFormer into a comprehensive library for training and deploying diverse LLMs on a wide range of hardware.

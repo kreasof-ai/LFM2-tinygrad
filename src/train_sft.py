@@ -210,6 +210,15 @@ def main(args):
     print("\n--- Training Complete ---")
     if args.use_wandb: wandb.finish()
 
+    if args.save_weights:
+        print("\n--- Saving Weights ---")
+        if args.hf_repo is not None:
+            model.save_pretrained(f"./my-finetuned-{args.model}", repo_id=args.hf_repo)
+            print(f"\nStored weights: ./my-finetuned-{args.model}")
+        else:
+            model.save_pretrained(f"./my-finetuned-{args.model}")
+            print(f"\nStored weights: ./my-finetuned-{args.model}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Supervised Fine-Tuning with LFM2 on tinygrad")
     # Model and Data
@@ -238,6 +247,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="lfm2-tinygrad-sft", help="Wandb project name")
     parser.add_argument("--wandb_run_name", type=str, default=f"sft-run-{int(time.time())}", help="Wandb run name")
+    # Saving weights
+    parser.add_argument("--save_weights", action="store_true", help="Enable Store Weights to Disk")
+    parser.add_argument("--hf_repo", type=str, default=None, help="Huggingface Target Repository")
     
     args = parser.parse_args()
     main(args)
