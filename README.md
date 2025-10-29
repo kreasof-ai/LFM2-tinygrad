@@ -89,11 +89,17 @@ In contrast, **training performance is highly competitive**. The training loop u
 
 On an **AMD RX 6700 XT**, a short LFM2 LoRA fine-tuning run (`max_length=512`, `batch_size=2`, `max_steps=100`) completed in approximately **4 minutes and 20 seconds**, utilizing ~10.1/12GB of VRAM. This proves that tinygrad is a powerful and viable framework for training on non-NVIDIA hardware.
 
-<img width="1920" height="1080" alt="Screenshot of a successful training run" src="https://github.com/user-attachments/assets/861afba5-ab6e-4dff-ab50-424e5cb0a56d" />
+<img alt="Screenshot of a successful training run" src="https://github.com/user-attachments/assets/861afba5-ab6e-4dff-ab50-424e5cb0a56d" />
 
 ---
 
 ## 🚀 Getting Started
+
+<a href="https://www.kaggle.com/code/akbar2habibullah/openformer-kaggle" target="_blank">
+<img src="https://kaggle.com/static/images/open-in-kaggle.svg" alt="Open in Kaggle" />
+</a>
+
+> Note: The Kaggle notebook provides a ready-to-use T4 GPU environment. Google Colab is not supported at this time due to driver issues.
 
 ### 1. Installation
 Clone the repository and install the required dependencies.
