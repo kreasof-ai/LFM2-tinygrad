@@ -83,6 +83,9 @@ This implementation is compatible with EXAONE 4 models.
 -   `LGAI-EXAONE/EXAONE-4.0-1.2B` (Tested ✅)
 -   `LGAI-EXAONE/EXAONE-4.0-32B` (Untested)
 
+### Granite 4
+There's implementation for dense Granite 4 models, but it doesn't pass the numerical accuracy check.
+
 ---
 
 ## 🧐 Performance: The tinygrad JIT Trade-off

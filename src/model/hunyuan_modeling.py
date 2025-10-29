@@ -70,7 +70,7 @@ class HunyuanModel(BaseModel):
     def __init__(self, config: HunyuanConfig, linear_class: Type):
         # Override BaseModel's __init__ to select the correct RoPE function
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
+        self.layers = [self._create_decoder_layer(config, linear_class, i) for i in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
         self.head_dim = config.head_dim
@@ -98,7 +98,7 @@ class HunyuanModel(BaseModel):
         self.cos_cache = cos_cache
         self.sin_cache = sin_cache
 
-    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
+    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type, layer_idx: int):
         return HunyuanDecoderLayer(config, linear_class)
 
 class HunyuanForCausalLM(BaseForCausalLM):

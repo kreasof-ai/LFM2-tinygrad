@@ -72,7 +72,7 @@ class LlamaDecoderLayer:
 class LlamaModel(BaseModel):
     def __init__(self, config: LlamaConfig, linear_class: Type):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
+        self.layers = [self._create_decoder_layer(config, linear_class, i) for i in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
         self.head_dim = config.head_dim
@@ -99,7 +99,7 @@ class LlamaModel(BaseModel):
         self.cos_cache = cos_cache
         self.sin_cache = sin_cache
 
-    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
+    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type, layer_idx: int):
         return LlamaDecoderLayer(config, linear_class)
 
 class LlamaForCausalLM(BaseForCausalLM):

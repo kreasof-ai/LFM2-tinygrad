@@ -74,7 +74,7 @@ class Exaone4Model(BaseModel):
         # We don't call super().__init__ to handle the specific RoPE initialization
         self.config = config # Store config for __call__
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
+        self.layers = [self._create_decoder_layer(config, linear_class, i) for i in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head_dim = config.head_dim
 
@@ -91,7 +91,7 @@ class Exaone4Model(BaseModel):
         self.cos_cache = cos_cache
         self.sin_cache = sin_cache
 
-    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
+    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type, layer_idx: int):
         return Exaone4DecoderLayer(config, linear_class)
 
     def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int, output_hidden_states: bool, **kwargs):

@@ -59,7 +59,7 @@ class Qwen3DecoderLayer:
         return hidden_states, new_kv
 
 class Qwen3Model(BaseModel):
-    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
+    def _create_decoder_layer(self, config: BaseConfig, linear_class: Type, layer_idx: int):
         return Qwen3DecoderLayer(config, linear_class)
 
     def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int, output_hidden_states: bool, **kwargs):

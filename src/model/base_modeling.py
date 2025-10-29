@@ -144,7 +144,7 @@ class BaseModel(ABC):
     """ The stack of decoder layers. """
     def __init__(self, config: BaseConfig, linear_class: Type):
         self.embed_tokens = Embedding(config.vocab_size, config.hidden_size)
-        self.layers = [self._create_decoder_layer(config, linear_class) for _ in range(config.num_hidden_layers)]
+        self.layers = [self._create_decoder_layer(config, linear_class, i) for i in range(config.num_hidden_layers)]
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
         self.head_dim = config.head_dim
