@@ -87,7 +87,7 @@ Here is a performance comparison for `LiquidAI/LFM2-350M` against PyTorch on an 
 ### Training: Surprisingly Fast
 In contrast, **training performance is highly competitive**. The training loop uses fixed-size input batches (`batch_size`, `max_length`), allowing the tinygrad JIT to compile highly optimized kernels once and reuse them.
 
-On an **AMD RX 6700 XT**, a short LFM2 LoRA fine-tuning run (`max_length=512`, `batch_size=2`, `max_steps=100`) completed in approximately **4 minutes and 20 seconds**, utilizing ~10.1/12GB of VRAM. This proves that tinygrad is a powerful and viable framework for training on non-NVIDIA hardware.
+On an **AMD RX 6700 XT**, a short LFM2 full fine-tuning run (`max_length=512`, `batch_size=2`, `max_steps=100`) completed in approximately **4 minutes and 20 seconds**, utilizing ~10.1/12GB of VRAM. This proves that tinygrad is a powerful and viable framework for training on non-NVIDIA hardware.
 
 <img alt="Screenshot of a successful training run" src="https://github.com/user-attachments/assets/861afba5-ab6e-4dff-ab50-424e5cb0a56d" />
 
