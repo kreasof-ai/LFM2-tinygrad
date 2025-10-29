@@ -24,7 +24,7 @@ from tinygrad.nn.state import load_state_dict, get_parameters, get_state_dict
 from experimental.paged_attention import PagedKVCache, PageTable
 from experimental.flash_attention import flash_attn
 from extra.lora import LoRALinear
-from extra.quantization import NF4Linear, Int8Linear
+from extra.quantization import NF4Linear, Int8Linear, SINQLinear
 from utils.rope import _precompute_rope_cache, apply_rotary_pos_emb
 from utils.output import CausalLMOutputWithPast
 
@@ -186,6 +186,7 @@ class BaseForCausalLM(ABC):
         
         if config.quantize == "nf4": self.linear_class = NF4Linear()
         elif config.quantize == "int8": self.linear_class = Int8Linear()
+        elif config.quantize == "sinq": self.linear_class = SINQLinear()
         else: self.linear_class = Linear
 
         self.model = self._create_model(config, self.linear_class)
@@ -359,7 +360,7 @@ class BaseForCausalLM(ABC):
                     if hf_key in f.keys():
                         tg_state_dict[tg_key] = Tensor(f.get_tensor(hf_key).to(torch.float32).numpy(), requires_grad=False)
 
-        if model.config.quantize in ["nf4", "int8"]:
+        if model.config.quantize in ["nf4", "int8", "sinq"]:
             device = getattr(model.model.embed_tokens.weight, 'device', Device.DEFAULT)
             tg_state_dict = model.linear_class.quantize(tg_state_dict, device=device)
 

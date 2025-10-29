@@ -1,4 +1,5 @@
 # FILE: src/extra/quantization.py
+from typing import Tuple
 from tinygrad import Tensor, dtypes, Device
 
 def Int8Linear():
@@ -107,3 +108,143 @@ def NF4Linear(block_size=64):
         print("--- NF4 Quantization Complete ---")
         return new_state_dict
   return _NF4Linear
+
+def SINQLinear(block_size=64, niter=20):
+  """
+  A Sinkhorn-Normalized Quantization (SINQ) linear layer for tinygrad.
+  This method uses dual-scaling (per-row and per-column scales) to better
+  handle outliers in weight matrices, improving low-bit quantization performance.
+  """
+  
+  def _sinkhorn_normalize(W: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    Applies the Sinkhorn-style normalization loop to a weight matrix tile.
+    Returns the normalized matrix and the row/column scales.
+    """
+    W_norm = W.float().clone() # Use float32 for normalization stability
+    
+    # Initialize scales. The paper's notation is s for rows, t for columns.
+    s_row = Tensor.ones(W.shape[0], dtype=W_norm.dtype)
+    s_col = Tensor.ones(W.shape[1], dtype=W_norm.dtype)
+
+    for _ in range(niter):
+        # Normalize columns (dim=0)
+        col_std = W_norm.std(axis=0) + 1e-6
+        W_norm = W_norm / col_std
+        s_col = s_col * col_std
+
+        # Normalize rows (dim=1)
+        row_std = W_norm.std(axis=1, keepdim=True) + 1e-6
+        W_norm = W_norm / row_std
+        s_row = s_row * row_std.squeeze()
+        
+    return W_norm, s_row, s_col
+
+  def _quantize_uniform_affine(W: Tensor, bits: int) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    A standard round-to-nearest (RTN) uniform quantizer.
+    Returns the quantized tensor, scale, and zero-point.
+    """
+    q_min, q_max = 0, 2**bits - 1
+    w_min, w_max = W.min().item(), W.max().item()
+    
+    scale = (w_max - w_min) / (q_max - q_min) if (w_max - w_min) != 0 else 1.0
+    zero_point = q_min - round(w_min / scale)
+    zero_point = max(q_min, min(q_max, zero_point)) # clamp
+
+    # Quantize and clamp
+    Q = (W / scale).round() + zero_point
+    return Q.clamp(q_min, q_max).cast(dtypes.uint8), Tensor([scale]), Tensor([zero_point])
+
+  class _SINQLinear:
+    def __init__(self, in_features, out_features, bias=False):
+      assert not bias, "bias not supported in SINQLinear"
+      self.in_features, self.out_features = in_features, out_features
+      
+      # Quantized weights (packed 4-bit)
+      self.q = Tensor.empty(int(out_features * in_features / 2), dtype=dtypes.uint8)
+      
+      # SINQ dual scales (one per row/col per block)
+      num_blocks = (out_features * in_features) // (block_size * block_size)
+      # Assuming square blocks for simplicity, matching paper's recommendation
+      rows_per_block, cols_per_block = block_size, block_size
+      
+      self.s_row = Tensor.empty(num_blocks, rows_per_block, dtype=dtypes.float16)
+      self.s_col = Tensor.empty(num_blocks, cols_per_block, dtype=dtypes.float16)
+
+      # Inner scale and zero-point for the uniform quantization (one per block)
+      self.inner_scale = Tensor.empty(num_blocks, 1, dtype=dtypes.float16)
+      self.inner_zero_point = Tensor.empty(num_blocks, 1, dtype=dtypes.uint8)
+
+    def dequantize(self) -> Tensor:
+      """ Dequantizes the entire weight tensor. """
+      # 1. Unpack 4-bit weights
+      high = (self.q >> 4).flatten()
+      low = (self.q & 0x0F).flatten()
+      unpacked_q = Tensor.stack(high, low, dim=-1).flatten().reshape(-1, block_size, block_size)
+      
+      # 2. Dequantize the inner uniform quantized matrix
+      W_dequant_inner = (unpacked_q.cast(self.inner_scale.dtype) - self.inner_zero_point) * self.inner_scale
+      
+      # 3. Apply the SINQ scales
+      # s_row shape: (num_blocks, block_size) -> (num_blocks, block_size, 1)
+      # s_col shape: (num_blocks, block_size) -> (num_blocks, 1, block_size)
+      W_dequant_full = self.s_row.unsqueeze(2) * W_dequant_inner * self.s_col.unsqueeze(1)
+      
+      # 4. Reshape back to the original matrix shape
+      # Assuming out_features is a multiple of block_size
+      num_blocks_per_row = self.in_features // block_size
+      W_dequant_full = W_dequant_full.reshape(-1, self.in_features)
+      
+      return W_dequant_full[:self.out_features, :] # Trim any padding
+
+    def __call__(self, x: Tensor) -> Tensor:
+      dequantized_weight = self.dequantize()
+      return x.linear(dequantized_weight.T)
+
+    @staticmethod
+    def quantize(state_dict: dict[str, Tensor], device, scale_dtype=dtypes.float16) -> dict[str, Tensor]:
+        print("--- Starting SINQ 4-bit Quantization ---")
+        new_state_dict = {}
+        quantizable_substrings = [".self_attn.", ".mlp.", ".operator.", ".feed_forward."]
+        
+        for k, v in state_dict.items():
+            if any(sub in k for sub in quantizable_substrings) and k.endswith(".weight") and "conv.weight" not in k and "norm.weight" not in k:
+                print(f"  Quantizing {k}...")
+                
+                # Reshape into blocks (tiles)
+                # For simplicity, we assume dimensions are divisible by block_size.
+                # Production code might need padding.
+                out_features, in_features = v.shape
+                assert out_features % block_size == 0 and in_features % block_size == 0, \
+                    f"Weight dims ({out_features}, {in_features}) must be divisible by block_size {block_size}"
+
+                tiles = v.reshape(out_features // block_size, block_size, in_features // block_size, block_size).permute(0, 2, 1, 3).reshape(-1, block_size, block_size)
+                
+                # Process each tile
+                q_list, s_row_list, s_col_list, inner_scale_list, inner_z_list = [], [], [], [], []
+                for tile in tiles.chunk(tiles.shape[0], dim=0):
+                    W_norm, s_row, s_col = _sinkhorn_normalize(tile.squeeze(0))
+                    q_tile, inner_scale, inner_z = _quantize_uniform_affine(W_norm, bits=4)
+                    
+                    q_list.append(q_tile)
+                    s_row_list.append(s_row)
+                    s_col_list.append(s_col)
+                    inner_scale_list.append(inner_scale)
+                    inner_z_list.append(inner_z)
+
+                # Pack 4-bit Q values into uint8
+                full_q = Tensor.stack(*q_list).flatten()
+                packed_q = (full_q[::2] << 4) | full_q[1::2]
+
+                # Store all the new tensors in the state dict
+                new_state_dict[k.replace(".weight", ".q")] = packed_q
+                new_state_dict[k.replace(".weight", ".s_row")] = Tensor.stack(*s_row_list).cast(scale_dtype)
+                new_state_dict[k.replace(".weight", ".s_col")] = Tensor.stack(*s_col_list).cast(scale_dtype)
+                new_state_dict[k.replace(".weight", ".inner_scale")] = Tensor.stack(*inner_scale_list).cast(scale_dtype)
+                new_state_dict[k.replace(".weight", ".inner_zero_point")] = Tensor.stack(*inner_z_list).cast(dtypes.uint8)
+            else:
+                new_state_dict[k] = v
+        print("--- SINQ Quantization Complete ---")
+        return new_state_dict
+  return _SINQLinear

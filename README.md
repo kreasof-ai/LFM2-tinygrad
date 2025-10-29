@@ -30,7 +30,7 @@ Built on a unified, extensible architecture, OpenFormer liberates you to train, 
 -   **Broad Architectural Support**: Ready-to-use, from-scratch implementations for diverse model families including **LFM2**, **Qwen**, **Llama 3**, and **Gemma 3**.
 -   **Verified for Correctness**: Rigorously tested against official Hugging Face Transformers implementations to ensure numerically identical outputs.
 -   **Built-in Fine-Tuning with LoRA**: A complete Supervised Fine-Tuning (SFT) script (`src/train_sft.py`) with integrated **Low-Rank Adaptation (LoRA)** support for efficient, low-memory training.
--   **Quantization Ready**: Out-of-the-box support for **INT8** and **NormalFloat4 (NF4)** quantization to reduce memory footprint during inference.
+-   **Quantization Ready**: Out-of-the-box support for **INT8**, **NormalFloat4 (NF4)** and **[Sinkhord Normalized Quantization (SINQ)](https://arxiv.org/abs/2509.22944)** quantization to reduce memory footprint during inference.
 -   **Advanced Attention Mechanisms**: Includes experimental implementations of **Paged Attention** (for efficient KV cache management) and **Flash Attention**.
 
 ---

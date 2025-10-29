@@ -17,7 +17,7 @@ if getenv("SEED"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LFM2 inference in tinygrad.")
     parser.add_argument("--use_fp16", action="store_true", help="Enable FP16 training for lower memory usage")
-    parser.add_argument("--quantize", type=str, default=None, choices=["nf4", "int8"], help="Enable NF4 or INT8 quantization for the model.")
+    parser.add_argument("--quantize", type=str, default=None, choices=["nf4", "int8", "sinq"], help="Enable NF4, INT8, or SINQ quantization.")
     parser.add_argument("--model", type=str, default="LFM2",  choices=MODEL_MAP.keys(), help="Supported model choice.")
     parser.add_argument("--model_id", type=str, default="LiquidAI/LFM2-350M", help="Hugging Face model repository ID")
     args = parser.parse_args()
