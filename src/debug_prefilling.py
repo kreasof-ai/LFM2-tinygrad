@@ -65,10 +65,10 @@ if __name__ == "__main__":
         logits_pt = pt_out.logits
         hidden_states_pt = pt_out.hidden_states
         position_ids = torch.arange(0, seq_len, dtype=torch.long).unsqueeze(0)
-        if args.model == "Qwen2" or args.model == "Qwen3" or args.model == "Gemma3":
-            cos_pt, sin_pt = model_hf.model.rotary_emb(hidden_states_pt[0], position_ids)
-        elif args.model == "LFM2":
+        if args.model == "LFM2":
             cos_pt, sin_pt = model_hf.model.pos_emb(hidden_states_pt[0], position_ids)
+        else:
+            cos_pt, sin_pt = model_hf.model.rotary_emb(hidden_states_pt[0], position_ids)
 
     # 5. Run tinygrad model
     print("\n--- Starting Step-by-Step tinygrad Comparison ---")

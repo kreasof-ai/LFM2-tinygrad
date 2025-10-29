@@ -27,7 +27,7 @@ Built on a unified, extensible architecture, OpenFormer liberates you to train, 
 ## 🌟 Key Features
 
 -   **Modular, Extensible Core**: Built on a modular `base_modeling.py` that simplifies the adaptation of new Hugging Face models, often in just a few lines of code.
--   **Broad Architectural Support**: Ready-to-use, from-scratch implementations for diverse model families including **LFM2**, **Qwen**, and **Gemma 3**.
+-   **Broad Architectural Support**: Ready-to-use, from-scratch implementations for diverse model families including **LFM2**, **Qwen**, **Llama 3**, and **Gemma 3**.
 -   **Verified for Correctness**: Rigorously tested against official Hugging Face Transformers implementations to ensure numerically identical outputs.
 -   **Built-in Fine-Tuning with LoRA**: A complete Supervised Fine-Tuning (SFT) script (`src/train_sft.py`) with integrated **Low-Rank Adaptation (LoRA)** support for efficient, low-memory training.
 -   **Quantization Ready**: Out-of-the-box support for **INT8** and **NormalFloat4 (NF4)** quantization to reduce memory footprint during inference.
@@ -62,6 +62,10 @@ This implementation is compatible with all dense Qwen3 models.
 This implementation supports text-only Gemma 3 models.
 -   `google/gemma-3-270m-it` (Tested ✅)
 -   `google/gemma-3-1b-it` (Tested ✅)
+
+### Llama 3.2
+This implementation supports text-only Llama 3.2 models.
+-   `meta-llama/Llama-3.2-1B-Instruct` (Tested ✅)
 
 ---
 

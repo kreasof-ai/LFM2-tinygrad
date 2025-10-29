@@ -44,6 +44,7 @@ class BaseConfig(ABC):
     max_position_embeddings: int = 4096
     tie_word_embeddings: bool = True
     attention_bias: bool = False
+    mlp_bias: bool = False
 
     # --- tinygrad specific flags ---
     dtype: Any = dtypes.float32
@@ -131,9 +132,10 @@ class BaseAttention:
 class BaseMLP:
     """ Standardized SwiGLU MLP. """
     def __init__(self, config: BaseConfig, linear_class: Type = Linear):
-        self.gate_proj = linear_class(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = linear_class(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = linear_class(config.intermediate_size, config.hidden_size, bias=False)
+        mlp_bias = getattr(config, "mlp_bias", False)
+        self.gate_proj = linear_class(config.hidden_size, config.intermediate_size, bias=mlp_bias)
+        self.up_proj = linear_class(config.hidden_size, config.intermediate_size, bias=mlp_bias)
+        self.down_proj = linear_class(config.intermediate_size, config.hidden_size, bias=mlp_bias)
     def __call__(self, x: Tensor) -> Tensor:
         return self.down_proj(self.gate_proj(x).silu() * self.up_proj(x))
 
