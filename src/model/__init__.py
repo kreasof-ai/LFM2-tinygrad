@@ -20,4 +20,5 @@ MODEL_MAP = {
     "Llama3": llama_modeling.LlamaForCausalLM,
     "Llama3.1": llama_modeling.LlamaForCausalLM,
     "Llama3.2": llama_modeling.LlamaForCausalLM,
+    "Smollm2": llama_modeling.LlamaForCausalLM,
 }

@@ -63,9 +63,15 @@ This implementation supports text-only Gemma 3 models.
 -   `google/gemma-3-270m-it` (Tested ✅)
 -   `google/gemma-3-1b-it` (Tested ✅)
 
-### Llama 3.2
-This implementation supports text-only Llama 3.2 models.
+### Llama 3
+This implementation supports text-only Llama 3 models.
 -   `meta-llama/Llama-3.2-1B-Instruct` (Tested ✅)
+-   And other variants (`3B`, `8B`, etc.)
+
+### SmolLM 2
+This implementation supports text-only SmolLM 2 models.
+-   `HuggingFaceTB/SmolLM2-135M-Instruct` (Tested ✅)
+-   And other variants (`360M`, `1.7B`, etc.)
 
 ---
 
