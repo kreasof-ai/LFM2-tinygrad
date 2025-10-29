@@ -27,7 +27,7 @@ def compare_tensors(tg_tensor: Tensor, pt_tensor: torch.Tensor, name: str):
     max_abs_diff = np.max(np.abs(tg_np - pt_np))
     print(f"  Max absolute difference: {max_abs_diff:.6f}")
 
-    is_close = np.allclose(tg_np, pt_np, atol=1e-3, rtol=1e-3)
+    is_close = np.allclose(tg_np, pt_np, atol=1e-3, rtol=1e-3) # some model need bigger tolerance
     if is_close:
         print("  ✅ MATCH: Tensors are numerically close.")
     else:

@@ -12,6 +12,21 @@ def _precompute_rope_cache(dim: int, max_seq_len: int, base: float, dtype) -> Tu
     emb = Tensor.cat(freqs, freqs, dim=-1)
     return emb.cos().contiguous(), emb.sin().contiguous()
 
+def _precompute_rope_cache_dynamic(dim: int, max_seq_len: int, rope_scaling: dict, dtype) -> Tuple[Tensor, Tensor]:
+    """Pre-computes the rotary positional embeddings using Hunyuan's specific scaling."""
+    base = rope_scaling["rope_theta"]
+    alpha = rope_scaling["alpha"]
+    
+    # This is the key formula from the Hunyuan implementation
+    new_base = base * (alpha ** (dim / (dim - 2.0)))
+    
+    # The rest of the calculation is standard RoPE, but using the new_base
+    inv_freq = 1.0 / (new_base ** (Tensor.arange(0, dim, 2, dtype=dtype) / dim))
+    t = Tensor.arange(max_seq_len, dtype=inv_freq.dtype)
+    freqs = t.reshape(-1, 1) * inv_freq.reshape(1, -1)
+    emb = Tensor.cat(freqs, freqs, dim=-1)
+    return emb.cos().contiguous(), emb.sin().contiguous()
+
 def _precompute_rope_cache_llama3(dim: int, max_seq_len: int, rope_scaling: dict, dtype) -> Tuple[Tensor, Tensor]:
     """Pre-computes the rotary positional embeddings using Llama 3's specific scaling."""
     base = rope_scaling["rope_theta"]
