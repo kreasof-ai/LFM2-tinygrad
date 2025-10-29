@@ -13,6 +13,7 @@ from tinygrad.nn import Conv1d, Linear, RMSNorm, Embedding
 
 # Project imports
 from model.base_modeling import BaseConfig, BaseForCausalLM, BaseModel
+from utils.rope import apply_rotary_pos_emb
 
 # --- Configuration ---
 @dataclass
@@ -53,6 +54,7 @@ class Granite4Config(BaseConfig):
             num_attention_heads=config_dict["num_attention_heads"], num_key_value_heads=config_dict["num_key_value_heads"],
             head_dim=head_dim, rms_norm_eps=config_dict["rms_norm_eps"], rope_theta=config_dict["rope_theta"],
             max_position_embeddings=config_dict["max_position_embeddings"],
+            position_embedding_type=config_dict["position_embedding_type"],
             tie_word_embeddings=config_dict.get("tie_word_embeddings", True),
             # Granite-4 specific
             attention_multiplier=config_dict["attention_multiplier"], embedding_multiplier=config_dict["embedding_multiplier"],
@@ -93,6 +95,7 @@ class Granite4SharedMLP:
 class Granite4Attention:
     """ Attention module with Granite-4's specific scaling factor. """
     def __init__(self, config: Granite4Config, linear_class: Type = Linear):
+        self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
@@ -105,11 +108,15 @@ class Granite4Attention:
         self.v_proj = linear_class(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = linear_class(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any]):
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int):
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).permute(0, 2, 1, 3)
         value_states = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        cos, sin = cos_sin
+        if self.config.position_embedding_type == "rope":
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_kv is not None:
             key_states = Tensor.cat(past_kv[0], key_states, dim=2)
@@ -152,7 +159,7 @@ class Granite4MambaLayer:
         self.D = Tensor.ones(self.num_heads, requires_grad=True)
         self.norm = Granite4RMSNormGated(self.intermediate_size, eps=config.rms_norm_eps)
 
-    def __call__(self, x: Tensor, past_state: Optional[Tuple[Tensor, Tensor]]):
+    def __call__(self, x: Tensor, past_state: Optional[Tuple[Tensor, Tensor]], start_pos: int):
         bsz, seq_len, _ = x.shape
         
         proj_out = self.in_proj(x)
@@ -218,14 +225,14 @@ class Granite4DecoderLayer:
         elif self.layer_type == "mamba": self.op = Granite4MambaLayer(config, linear_class)
         else: raise ValueError(f"Unknown layer type: {self.layer_type}")
 
-    def __call__(self, x: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any]):
+    def __call__(self, x: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int):
         residual = x
         x_norm = self.input_layernorm(x)
 
         if self.layer_type == "attention":
-            op_out, new_state = self.op(x_norm, attention_mask, past_state)
+            op_out, new_state = self.op(x_norm, attention_mask, past_state, cos_sin, start_pos)
         else:
-            op_out, new_state = self.op(x_norm, past_state)
+            op_out, new_state = self.op(x_norm, past_state, start_pos)
         
         x = residual + op_out * self.residual_multiplier
         residual = x
@@ -248,11 +255,13 @@ class Granite4Model(BaseModel):
         all_hidden_states = (h,) if output_hidden_states else None
         
         mask = Tensor.full((1, 1, seq_len, seq_len), -float("inf")).triu(1).realize() if seq_len > 1 else None
+        cos = self.cos_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, self.head_dim).expand(bsz, 1, seq_len, self.head_dim)
+        sin = self.sin_cache[start_pos : start_pos + seq_len].reshape(1, 1, seq_len, self.head_dim).expand(bsz, 1, seq_len, self.head_dim)
         
         new_states_list = []
         for i, layer in enumerate(self.layers):
             past_st = past_states[i] if past_states else None
-            h, new_st = layer(h, mask, past_st, **kwargs)
+            h, new_st = layer(h, mask, past_st, (cos, sin), start_pos, **kwargs)
             new_states_list.append(new_st)
             if i + 1 == len(self.layers): h = self.norm(h)
             if output_hidden_states: all_hidden_states += (h,)
