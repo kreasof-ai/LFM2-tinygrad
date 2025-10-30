@@ -1,8 +1,6 @@
-# Edit this file: src/model/__init__.py
-
 # src/model/__init__.py
 
-__all__ = ["base_modeling", "lfm2_modeling", "qwen3_modeling", "qwen2_modeling", "gemma3_modeling", "llama_modeling", "hunyuan_modeling", "exaone4_modeling", "granite4_modeling", "falconh1_modeling"]
+__all__ = ["base_modeling", "lfm2_modeling", "qwen3_modeling", "qwen2_modeling", "gemma3_modeling", "gemma2_modeling", "llama_modeling", "hunyuan_modeling", "exaone4_modeling", "granite4_modeling", "falconh1_modeling"]
 
 # Import the submodules
 from . import base_modeling
@@ -10,6 +8,7 @@ from . import lfm2_modeling
 from . import qwen3_modeling
 from . import qwen2_modeling
 from . import gemma3_modeling
+from . import gemma2_modeling
 from . import llama_modeling
 from . import hunyuan_modeling
 from . import exaone4_modeling
@@ -22,6 +21,7 @@ MODEL_MAP = {
     "Qwen2": qwen2_modeling.Qwen2ForCausalLM,
     "Qwen2.5": qwen2_modeling.Qwen2ForCausalLM,
     "Gemma3": gemma3_modeling.Gemma3ForCausalLM,
+    "Gemma2": gemma2_modeling.Gemma2ForCausalLM,
     "Llama": llama_modeling.LlamaForCausalLM,
     "Llama3": llama_modeling.LlamaForCausalLM,
     "Llama3.1": llama_modeling.LlamaForCausalLM,

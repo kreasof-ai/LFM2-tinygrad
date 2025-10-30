@@ -58,6 +58,11 @@ This implementation is compatible with all dense Qwen3 models.
 -   `Qwen/Qwen3-4B` (Tested ✅)
 -   And other variants (`8B`, `14B`, etc.)
 
+### Gemma 2
+This implementation supports all dense Gemma 2 models.
+-   `google/gemma-2-2b-it` (Tested ✅)
+-   And other variants (`9B` and `27B`)
+
 ### Gemma 3
 This implementation supports text-only Gemma 3 models.
 -   `google/gemma-3-270m-it` (Tested ✅)
