@@ -130,8 +130,9 @@ On an **AMD RX 6700 XT**, a short LFM2 full fine-tuning run (`max_length=512`, `
 | Notebook | Link |
 |----------|------|
 | Kaggle   | <a href="https://www.kaggle.com/code/akbar2habibullah/openformer-kaggle" target="_blank"><img src="https://kaggle.com/static/images/open-in-kaggle.svg" alt="Open in Kaggle" /></a> |
+| Colab (CPU-only)   | <a href="https://colab.research.google.com/drive/1gfOBlc3WZ25GOSbBLAmJGpBp8ghjN5U0?usp=sharing" target="_blank"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab" /></a> |
 
-> Note: The Kaggle notebook provides a ready-to-use T4 GPU environment. Google Colab is not supported at this time due to driver issues.
+> Note: The Kaggle notebook provides a ready-to-use T4 GPU environment. Google Colab T4 is not supported at this time due to driver issues.
 
 ### 1. Installation
 Clone the repository and install the required dependencies.
