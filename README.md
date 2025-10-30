@@ -140,7 +140,7 @@ Clone the repository and install the required dependencies.
 ```bash
 git clone https://github.com/kreasof-ai/OpenFormer.git
 cd OpenFormer
-pip install tinygrad torch transformers huggingface_hub safetensors tqdm datasets wandb
+pip install tinygrad torch transformers huggingface_hub safetensors tqdm datasets wandb numpy
 ```
 
 ### 2. Usage Examples
