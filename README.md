@@ -87,6 +87,7 @@ This implementation is compatible with EXAONE 4 models.
 There's implementation for dense Granite 4 models.
 -   `ibm-granite/granite-4.0-h-350m` (Tested ✅)
 -   `ibm-granite/granite-4.0-350m` (Tested ✅)
+-   Note that we don't support MoE version yet like tiny and small version
 
 ### Falcon H1
 
