@@ -19,6 +19,7 @@ Most modern decoder-only transformers follow a similar "pre-norm" structure:
 
 OpenFormer provides robust, reusable components for this pattern in `src/model/base_modeling.py`:
 -   `BaseAttention`: A standardized attention module supporting Grouped-Query Attention (GQA), optional QK Normalization, and RoPE.
+-   Note that Tinygrad `scaled_dot_product_attention` don't support softmax scale at this moment. So, you need to implement manual attention like `gemma3_modeling.py` or `falconh1_modeling.py` if you need custom softmax scale.
 -   `BaseMLP`: A standardized SwiGLU MLP.
 -   `BaseModel` & `BaseForCausalLM`: A powerful skeleton that handles weight loading, generation logic, quantization, and tying all the components together.
 
