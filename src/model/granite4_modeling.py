@@ -221,8 +221,8 @@ class Granite4DecoderLayer:
             raise NotImplementedError("Mixture of Experts is not yet supported in OpenFormer for Granite-4.")
         self.mlp = Granite4SharedMLP(config, linear_class)
         
-        if self.layer_type == "attention": self.op = Granite4Attention(config, linear_class)
-        elif self.layer_type == "mamba": self.op = Granite4MambaLayer(config, linear_class)
+        if self.layer_type == "attention": self.operator = Granite4Attention(config, linear_class)
+        elif self.layer_type == "mamba": self.operator = Granite4MambaLayer(config, linear_class)
         else: raise ValueError(f"Unknown layer type: {self.layer_type}")
 
     def __call__(self, x: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int):
@@ -230,9 +230,9 @@ class Granite4DecoderLayer:
         x_norm = self.input_layernorm(x)
 
         if self.layer_type == "attention":
-            op_out, new_state = self.op(x_norm, attention_mask, past_state, cos_sin, start_pos)
+            op_out, new_state = self.operator(x_norm, attention_mask, past_state, cos_sin, start_pos)
         else:
-            op_out, new_state = self.op(x_norm, past_state, start_pos)
+            op_out, new_state = self.operator(x_norm, past_state, start_pos)
         
         x = residual + op_out * self.residual_multiplier
         residual = x
@@ -304,7 +304,7 @@ class Granite4ForCausalLM(BaseForCausalLM):
                 f"{p}.shared_mlp.output_linear.weight": f"{p}.mlp.output_linear.weight",
             })
             if layer_type == "attention":
-                op_p = f"{p}.op"
+                op_p = f"{p}.operator"
                 key_map.update({
                     f"{p}.self_attn.q_proj.weight": f"{op_p}.q_proj.weight",
                     f"{p}.self_attn.k_proj.weight": f"{op_p}.k_proj.weight",
@@ -312,7 +312,7 @@ class Granite4ForCausalLM(BaseForCausalLM):
                     f"{p}.self_attn.o_proj.weight": f"{op_p}.o_proj.weight",
                 })
             else: # mamba
-                op_p = f"{p}.op"
+                op_p = f"{p}.operator"
                 key_map.update({
                     f"{p}.mamba.in_proj.weight": f"{op_p}.in_proj.weight",
                     f"{p}.mamba.conv1d.weight": f"{op_p}.conv1d.weight",

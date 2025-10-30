@@ -27,7 +27,7 @@ Built on a unified, extensible architecture, OpenFormer liberates you to train, 
 ## 🌟 Key Features
 
 -   **Modular, Extensible Core**: Built on a modular `base_modeling.py` that simplifies the adaptation of new Hugging Face models, often in just a few lines of code.
--   **Broad Architectural Support**: Ready-to-use, from-scratch implementations for diverse model families including **LFM2**, **Qwen**, **Llama 3**, **Gemma 3**, **EXAONE 4**, and **Hunyuan**.
+-   **Broad Architectural Support**: Ready-to-use, from-scratch implementations for diverse model families including **LFM2**, **Qwen**, **Llama 3**, **Gemma 3**, **EXAONE 4**, **Falcon H1**, and **Hunyuan**.
 -   **Verified for Correctness**: Rigorously tested against official Hugging Face Transformers implementations to ensure numerically identical outputs.
 -   **Built-in Fine-Tuning with LoRA**: A complete Supervised Fine-Tuning (SFT) script (`src/train_sft.py`) with integrated **Low-Rank Adaptation (LoRA)** support for efficient, low-memory training.
 -   **Quantization Ready**: Out-of-the-box support for **INT8** and **NormalFloat4 (NF4)** quantization to reduce memory footprint during inference.
@@ -84,7 +84,15 @@ This implementation is compatible with EXAONE 4 models.
 -   `LGAI-EXAONE/EXAONE-4.0-32B` (Untested)
 
 ### Granite 4
-There's implementation for dense Granite 4 models, but it doesn't pass the numerical accuracy check.
+There's implementation for dense Granite 4 models.
+-   `ibm-granite/granite-4.0-h-350m` (Tested ✅)
+-   `ibm-granite/granite-4.0-350m` (Tested ✅)
+
+### Falcon H1
+
+This implementation is compatible with all dense Falcon H1 models.
+-   `tiiuae/Falcon-H1-0.5B-Instruct` (Tested ✅)
+-   And other variants (`1.5B`, `3B`, etc.)
 
 ---
 
