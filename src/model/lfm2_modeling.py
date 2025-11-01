@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Tuple, Type
 from huggingface_hub import hf_hub_download
 
 # tinygrad imports
-from tinygrad import Tensor, dtypes
+from tinygrad import Tensor, dtypes, TinyJit
 from tinygrad.nn import Conv1d, Linear, RMSNorm, Embedding
 
 # Project imports
@@ -65,31 +65,59 @@ class LFM2ConvOperator:
             bias=False
         )
         self.out_proj = linear_class(config.hidden_size, config.hidden_size, bias=False)
-        
-    def __call__(self, x: Tensor, past_conv_state: Optional[Tensor]):
+
+        self._forward_decoding_jit = TinyJit(self._forward_decoding)
+
+    def _forward_decoding(self, x: Tensor, past_conv_state: Optional[Tensor]):
+        """
+        Decoding only expect fixed shape so we can do JIT
+        """
         bsz, seq_len, _ = x.shape
         B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
         x_gated = B * x_proj
 
         x_gated_permuted = x_gated.permute(0, 2, 1)
 
-        if seq_len > 1:
-            conv_out = self.conv(x_gated_permuted)[:, :, :seq_len]
-            if seq_len < self.kernel_size:
-                pad_amount = self.kernel_size - seq_len
-                padding = Tensor.zeros(bsz, self.hidden_size, pad_amount, device=x.device, dtype=x.dtype)
-                new_conv_state = Tensor.cat(padding, x_gated_permuted, dim=2)
-            else:
-                new_conv_state = x_gated_permuted[:, :, -self.kernel_size:]
-        else: # Generation stage (seq_len == 1)
-            assert past_conv_state is not None
-            assert past_conv_state.shape[2] == self.kernel_size
-            new_conv_state = Tensor.cat(past_conv_state[:, :, 1:], x_gated_permuted, dim=2)
-            conv_weights = self.conv.weight.reshape(1, self.hidden_size, self.kernel_size)
-            conv_out = (new_conv_state * conv_weights).sum(axis=2, keepdim=True)
+        assert past_conv_state is not None
+        assert past_conv_state.shape[2] == self.kernel_size
+        new_conv_state = Tensor.cat(past_conv_state[:, :, 1:], x_gated_permuted, dim=2)
+        conv_weights = self.conv.weight.reshape(1, self.hidden_size, self.kernel_size)
+        conv_out = (new_conv_state * conv_weights).sum(axis=2, keepdim=True)
 
         conv_out = conv_out.permute(0, 2, 1)
         output = self.out_proj(C * conv_out)
+        return output, new_conv_state
+    
+    def _forward_prefill(self, x: Tensor, past_conv_state: Optional[Tensor]):
+        """
+        Prefill expect variable length, so no JIT
+        """
+        bsz, seq_len, _ = x.shape
+        B, C, x_proj = self.in_proj(x).chunk(3, dim=-1)
+        x_gated = B * x_proj
+
+        x_gated_permuted = x_gated.permute(0, 2, 1)
+
+        conv_out = self.conv(x_gated_permuted)[:, :, :seq_len]
+        if seq_len < self.kernel_size:
+            pad_amount = self.kernel_size - seq_len
+            padding = Tensor.zeros(bsz, self.hidden_size, pad_amount, device=x.device, dtype=x.dtype)
+            new_conv_state = Tensor.cat(padding, x_gated_permuted, dim=2)
+        else:
+            new_conv_state = x_gated_permuted[:, :, -self.kernel_size:]
+
+        conv_out = conv_out.permute(0, 2, 1)
+        output = self.out_proj(C * conv_out)
+        return output, new_conv_state
+        
+    def __call__(self, x: Tensor, past_conv_state: Optional[Tensor]):
+        _, seq_len, _ = x.shape
+
+        if seq_len > 1:
+            output, new_conv_state = self._forward_prefill(x, past_conv_state)
+        else: # Generation stage (seq_len == 1)
+            output, new_conv_state = self._forward_decoding_jit(x.contiguous(), past_conv_state.contiguous())
+
         return output, new_conv_state
 
 class LFM2MLP(BaseMLP): # Renaming SwiGLU to match base class
