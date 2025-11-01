@@ -1,6 +1,6 @@
 # src/model/__init__.py
 
-__all__ = ["base_modeling", "lfm2_modeling", "qwen3_modeling", "qwen2_modeling", "gemma3_modeling", "gemma2_modeling", "llama_modeling", "hunyuan_modeling", "exaone4_modeling", "granite4_modeling", "falconh1_modeling"]
+__all__ = ["base_modeling", "lfm2_modeling", "qwen3_modeling", "qwen2_modeling", "gemma3_modeling", "gemma2_modeling", "llama_modeling", "hunyuan_modeling", "exaone4_modeling", "granite4_modeling", "falconh1_modeling", "olmoe_modeling"]
 
 # Import the submodules
 from . import base_modeling
@@ -14,6 +14,7 @@ from . import hunyuan_modeling
 from . import exaone4_modeling
 from . import granite4_modeling
 from . import falconh1_modeling
+from . import olmoe_modeling
 
 MODEL_MAP = {
     "LFM2": lfm2_modeling.LFM2ForCausalLM,
@@ -31,4 +32,5 @@ MODEL_MAP = {
     "Exaone4": exaone4_modeling.Exaone4ForCausalLM,
     "Granite4": granite4_modeling.Granite4ForCausalLM,
     "FalconH1": falconh1_modeling.FalconH1ForCausalLM,
+    "Olmoe": olmoe_modeling.OlmoeForCausalLM,
 }
