@@ -14,9 +14,9 @@ from tinygrad.helpers import getenv
 from model import lfm2_modeling
 
 # --- Test Configuration ---
-REPO_ID = "LiquidAI/LFM2-350M"
-PROMPT = "The secret to a long and happy life is"
-MAX_NEW_TOKENS = 64
+REPO_ID = "LiquidAI/LFM2-350M-Math"
+PROMPT = "Find the sum of all integer bases $b>9$ for which $17_{b}$ is a divisor of $97_{b}$."
+MAX_NEW_TOKENS = 512
 # Use greedy decoding for a fair speed comparison (no random sampling)
 TEMPERATURE = 0.0
 
@@ -88,13 +88,13 @@ def run_tinygrad_test(name: str, config_overrides: dict):
     
     print("Generating tokens...")
     start_time = time.perf_counter()
-    _ = model.generate(
+    output = model.generate(
         input_ids, max_new_tokens=MAX_NEW_TOKENS, temperature=TEMPERATURE, do_sample=False
     )
     end_time = time.perf_counter()
     
     elapsed_time = end_time - start_time
-    tokens_per_sec = MAX_NEW_TOKENS / elapsed_time
+    tokens_per_sec = output.shape[1] / elapsed_time
     
     print(f"\nTime taken: {elapsed_time:.4f} seconds")
     print(f"Tokens per second: {tokens_per_sec:.2f} tok/s")
@@ -117,10 +117,6 @@ if __name__ == "__main__":
         ("huggingface", run_huggingface_test, (tokenizer,)),
         ("std_fp32", run_tinygrad_test, ("Standard tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": False})),
         ("std_fp16", run_tinygrad_test, ("Standard tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": False})),
-        ("std_int8", run_tinygrad_test, ("Standard tinygrad (INT8)", {"quantize": "int8", "torch_dtype": "float16"})),
-        ("paged_fp32", run_tinygrad_test, ("Paged tinygrad (FP32)", {"torch_dtype": "float32", "use_paged_attention": True})),
-        ("paged_fp16", run_tinygrad_test, ("Paged tinygrad (FP16)", {"torch_dtype": "float16", "use_paged_attention": True})),
-        ("paged_int8", run_tinygrad_test, ("Paged tinygrad (INT8)", {"quantize": "int8", "torch_dtype": "float16", "use_paged_attention": True})),
     ]
     
     results = {}
@@ -142,18 +138,3 @@ if __name__ == "__main__":
 
     s16_time, s16_tps = results["std_fp16"]
     print(f"{'Standard tinygrad (FP16)':<30} | {s16_time:<15.4f} | {s16_tps:<10.2f}")
-    
-    if "std_int8" in results:
-        s8_time, s8_tps = results["std_int8"]
-        print(f"{'Standard tinygrad (INT8)':<30} | {s8_time:<15.4f} | {s8_tps:<10.2f}")
-
-    p32_time, p32_tps = results["paged_fp32"]
-    print(f"{'Paged tinygrad (FP32)':<30} | {p32_time:<15.4f} | {p32_tps:<10.2f}")
-
-    p16_time, p16_tps = results["paged_fp16"]
-    print(f"{'Paged tinygrad (FP16)':<30} | {p16_time:<15.4f} | {p16_tps:<10.2f}")
-    
-    if "paged_int8" in results:
-        p8_time, p8_tps = results["paged_int8"]
-        print(f"{'Paged tinygrad (INT8)':<30} | {p8_time:<15.4f} | {p8_tps:<10.2f}")
-    print("=" * 60)

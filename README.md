@@ -109,17 +109,13 @@ OpenFormer's performance profile directly reflects the strengths and current lim
 ### Inference: Slow but Steady
 Currently, autoregressive decoding (inference) is **slow**. tinygrad's JIT is optimized for tensors with **fixed shapes**. Because the sequence length changes at each generation step, the computation graph must be re-compiled for every new token, creating significant overhead.
 
-Here is a performance comparison for `LiquidAI/LFM2-350M` against PyTorch on an **AMD RX 6700 XT**:
+Here is a performance comparison for `LiquidAI/LFM2-350M-Math` against PyTorch on an **AMD RX 6700 XT**:
 
-| Implementation                 | Time Taken (s) for 64 tokens | Tokens/sec |
-| ------------------------------ | ---------------------------- | ---------- |
-| Hugging Face (PyTorch)         | 2.6467                       | 24.18      |
-| **OpenFormer (FP32)**          | **65.3724**                  | **0.98**   |
-| **OpenFormer (FP16)**          | **71.8813**                  | **0.89**   |
-| **OpenFormer (INT8)**          | **63.3681**                  | **1.01**   |
-| OpenFormer (Paged, FP32)       | 77.2624                      | 0.83       |
-
-*As shown, the primary bottleneck is kernel compilation, not memory access or data type precision.*
+| Implementation                 | Time Taken (s) for 512 tokens  | Tokens/sec |
+| ------------------------------ | ------------------------------ | ---------- |
+| Hugging Face (PyTorch)         | 17.8802                        | 28.64      |
+| **OpenFormer (FP32)**          | **116.9586**                   | **4.70**   |
+| **OpenFormer (FP16)**          | **154.5763**                   | **3.56**   |
 
 ### Training: Surprisingly Fast
 In contrast, **training performance is highly competitive**. The training loop uses fixed-size input batches (`batch_size`, `max_length`), allowing the tinygrad JIT to compile highly optimized kernels once and reuse them.

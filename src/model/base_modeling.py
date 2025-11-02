@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 from huggingface_hub.utils import EntryNotFoundError
 
 # tinygrad imports
-from tinygrad import Tensor, dtypes, Device
+from tinygrad import Tensor, dtypes, Device, TinyJit, UOp
 from tinygrad.nn import Embedding, Linear, RMSNorm
 from tinygrad.nn.state import load_state_dict, get_parameters, get_state_dict
 
@@ -45,6 +45,8 @@ class BaseConfig(ABC):
     tie_word_embeddings: bool = True
     attention_bias: bool = False
     mlp_bias: bool = False
+    max_context: int = 4096
+    use_cache: bool = True # False for training
 
     # --- tinygrad specific flags ---
     dtype: Any = dtypes.float32
@@ -88,7 +90,9 @@ class BaseAttention:
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if getattr(config, "qk_norm") else lambda x: x
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps) if getattr(config, "qk_norm") else lambda x: x
 
-    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, batch_idx: Optional[Tensor] = None, seq_lens: Optional[List[int]] = None):
+        self._forward_decoding_jit = TinyJit(self._forward_decoding)
+
+    def _forward_decoding(self, hidden_states: Tensor, start_pos:UOp, cos_sin: Tuple[Tensor, Tensor]):
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
         key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
@@ -101,33 +105,53 @@ class BaseAttention:
         cos, sin = cos_sin
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if self.config.use_paged_attention:
-            paged_kv_cache = past_kv
-            input_pos = Tensor.arange(start_pos, start_pos + q_len).reshape(1, q_len).expand(bsz, q_len)
-            paged_kv_cache.update(batch_idx, input_pos, key_states.permute(0, 2, 1, 3), value_states.permute(0, 2, 1, 3))
-            
-            all_key_states, all_value_states = paged_kv_cache.gather_kv_for_attention(batch_idx, seq_lens)
-            all_key_states = all_key_states.permute(0, 2, 1, 3)
-            all_value_states = all_value_states.permute(0, 2, 1, 3)
-            present_kv = paged_kv_cache
-        else: # Standard KV Caching
-            past_key_value = past_kv
-            if past_key_value is not None:
-                key_states = Tensor.cat(past_key_value[0], key_states, dim=2)
-                value_states = Tensor.cat(past_key_value[1], value_states, dim=2)
-            all_key_states, all_value_states = key_states, value_states
-            present_kv = (key_states, value_states)
+        self.cache_kv[:, :, :, start_pos:start_pos+q_len, :].assign(Tensor.stack(key_states, value_states)).realize()
+        key_states = self.cache_kv[0, :, :, 0:start_pos+q_len, :]
+        value_states = self.cache_kv[1, :, :, 0:start_pos+q_len, :]
+
+        attn_output = Tensor.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=None, enable_gqa=True)
+        
+        attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.num_heads * self.head_dim)
+        return self.o_proj(attn_output)
+
+    def _forward_prefill(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor]):
+        bsz, q_len, _ = hidden_states.shape
+        query_states = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
+        key_states = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        value_states = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        
+        query_states = self.q_norm(query_states).permute(0, 2, 1, 3)
+        key_states = self.k_norm(key_states).permute(0, 2, 1, 3)
+        value_states = value_states.permute(0, 2, 1, 3)
+
+        cos, sin = cos_sin
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if self.config.use_cache:
+            self.cache_kv = Tensor.zeros(2, bsz, self.num_key_value_heads, self.config.max_context, self.head_dim, dtype=hidden_states.dtype, device=hidden_states.device).contiguous().realize()
+            self.cache_kv[:, :, :, 0:q_len, :].assign(Tensor.stack(key_states, value_states)).realize()
+
+        all_key_states, all_value_states = key_states, value_states
+        present_kv = (key_states, value_states)
 
         all_key_states = all_key_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
         all_value_states = all_value_states.unsqueeze(2).expand(-1, -1, self.num_key_value_groups, -1, -1).reshape(bsz, self.num_heads, -1, self.head_dim)
 
-        if self.config.use_flash_attention:
-            attn_output = flash_attn(query_states, all_key_states, all_value_states, sm_scale=1.0 / (self.head_dim**0.5), start_pos=start_pos)
-        else:
-            attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
+        attn_output = Tensor.scaled_dot_product_attention(query_states, all_key_states, all_value_states, attn_mask=attention_mask)
         
         attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, self.num_heads * self.head_dim)
         return self.o_proj(attn_output), present_kv
+
+    def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_kv: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos:int|UOp):
+        _, q_len, _ = hidden_states.shape
+
+        if q_len > 1:
+            output, new_state = self._forward_prefill(hidden_states, attention_mask, past_kv, cos_sin)
+        else: # Generation stage (q_len == 1)
+            output = self._forward_decoding_jit(hidden_states.contiguous(), start_pos, (cos_sin[0].contiguous(), cos_sin[1].contiguous()))
+            new_state = None
+
+        return output, new_state
 
 class BaseMLP:
     """ Standardized SwiGLU MLP. """
@@ -157,7 +181,7 @@ class BaseModel(ABC):
     def _create_decoder_layer(self, config: BaseConfig, linear_class: Type):
         raise NotImplementedError
 
-    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int, output_hidden_states: bool, **kwargs):
+    def __call__(self, input_ids: Tensor, past_states: Optional[List[Any]], start_pos: int|UOp, output_hidden_states: bool, **kwargs):
         h = self.embed_tokens(input_ids)
         bsz, seq_len, _ = h.shape
         all_hidden_states = (h,) if output_hidden_states else None
@@ -267,6 +291,7 @@ class BaseForCausalLM(ABC):
             finally:
                 if batch_idx_int != -1: self.page_table.erase(batch_idx_int)
         else: # Standard generation
+            v_start_pos = UOp.variable("start_pos", 1, self.config.max_context-1)
             past_states = [None] * len(self.model.layers)
             outputs = self(Tensor([tokens]), past_states, start_pos=0)
             start_pos = len(tokens)
@@ -277,7 +302,7 @@ class BaseForCausalLM(ABC):
                 tokens.append(next_token)
                 if next_token == self.tokenizer.eos_token_id: break
                 self._decode_one_token(next_token)
-                outputs = self(Tensor([[next_token]]), past_states, start_pos=start_pos)
+                outputs = self(Tensor([[next_token]]), past_states, start_pos=v_start_pos.bind(start_pos))
                 start_pos += 1
         return Tensor([tokens], dtype=dtypes.int32)
     
