@@ -124,6 +124,8 @@ def main(args):
         torch_dtype="float16" if args.use_fp16 else "float32",
     )
 
+    model.config.use_cache = False
+
     tokenizer = model.tokenizer
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     
