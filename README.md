@@ -113,9 +113,9 @@ Here is a performance comparison for `LiquidAI/LFM2-350M-Math` against PyTorch o
 
 | Implementation                 | Time Taken (s) for 512 tokens  | Tokens/sec |
 | ------------------------------ | ------------------------------ | ---------- |
-| Hugging Face (PyTorch)         | 17.8802                        | 28.64      |
-| **OpenFormer (FP32)**          | **116.9586**                   | **4.70**   |
-| **OpenFormer (FP16)**          | **154.5763**                   | **3.56**   |
+| Hugging Face (PyTorch)         | 15.9144                        | 32.17      |
+| **OpenFormer (FP32)**          | **84.9805**                    | **6.47**   |
+| **OpenFormer (FP16)**          | **105.0477**                   | **5.24**   |
 
 ### Training: Surprisingly Fast
 In contrast, **training performance is highly competitive**. The training loop uses fixed-size input batches (`batch_size`, `max_length`), allowing the tinygrad JIT to compile highly optimized kernels once and reuse them.

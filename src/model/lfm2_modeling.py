@@ -134,15 +134,28 @@ class LFM2DecoderLayer:
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        self._ffn_jit = TinyJit(self._ffn)
+
+    def _ffn(self, hidden_states: Tensor):
+        hidden_states = hidden_states + self.feed_forward(self.ffn_norm(hidden_states))
+        return hidden_states
+
     def __call__(self, hidden_states: Tensor, attention_mask: Optional[Tensor], past_state: Optional[Any], cos_sin: Tuple[Tensor, Tensor], start_pos: int, **kwargs):
+        _, seq_len, _ = hidden_states.shape
         residual = hidden_states
         normed_hidden = self.operator_norm(hidden_states)
         if self.is_attention_block:
             op_out, new_state = self.operator(normed_hidden, attention_mask, past_state, cos_sin, start_pos, **kwargs)
         else:
             op_out, new_state = self.operator(normed_hidden, past_state)
+        
         hidden_states = op_out + residual
-        hidden_states = hidden_states + self.feed_forward(self.ffn_norm(hidden_states))
+
+        if seq_len > 1:
+            hidden_states = self._ffn(hidden_states)
+        else:
+            hidden_states = self._ffn_jit(hidden_states)
+        
         return hidden_states, new_state
 
 class LFM2Model: # Not inheriting from BaseModel because layer structure is too different
