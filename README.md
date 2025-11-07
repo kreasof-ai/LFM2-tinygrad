@@ -4,6 +4,9 @@
 		<img alt="openformer-logo" src="https://github.com/user-attachments/assets/5ea13eaf-38b9-4c52-85a4-eed2eaa99d4d" width=50%>
 	</picture>
 </p>
+<div align="center">
+	<a href="https://deepwiki.com/kreasof-ai/OpenFormer"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+</div>
 <h3 align="center">
 A hackable library for running and fine-tuning modern transformer models on commodity and alternative GPUs, powered by <a href="https://github.com/tinygrad/tinygrad">tinygrad</a>
 </h3>
