@@ -5,6 +5,7 @@
 	</picture>
 </p>
 <div align="center">
+	<img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 License">
 	<a href="https://deepwiki.com/kreasof-ai/OpenFormer"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </div>
 <h3 align="center">
